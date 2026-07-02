@@ -47,6 +47,53 @@ Every observation/facet carries a **lens** tag:
   `witness lens enable math` makes it run on every session (alongside `default`). Lenses are shared,
   not tied to any repo, so the same `math` lens covers all your math work.
 
+## Example: one moment, end to end
+
+Say a session contains this exchange (fictional):
+
+> **you:** the migration keeps failing on prod but passes locally — I'll just run it by hand and move on
+>
+> **you:** …wait, what's actually *different* about prod? let me diff the two schemas before I touch anything
+
+Here's what each layer makes of it.
+
+**raw (L0)** — captured verbatim, nothing interpreted:
+
+```
+user  the migration keeps failing on prod but passes locally — I'll just run it by hand and move on
+user  wait, what's actually different about prod? let me diff the two schemas before I touch anything
+```
+
+**observations (L1)** — the worker mines one atomic, evidence-anchored noticing:
+
+```
+[thinking] Caught the urge to hand-patch around a failure and redirected to isolating the
+           prod/local difference before acting.
+  evidence: "run it by hand and move on" → "what's different about prod? diff before I touch anything"
+  poignancy: 6    lens: default
+```
+
+**facets (L2)** — after several such moments the reviewer synthesizes an evolving attribute, and
+**keeps the history** (the whole point — it shows *change*, not just current state):
+
+```
+default · thinking · diagnoses_before_acting                        confidence 0.82
+  2026-05 → now       Catches the reflex to work around a failure and isolates the
+                      mechanism first; gates action on understanding the cause.
+  2026-02 → 2026-05   Tended to apply the first workaround that unblocked the task.   (superseded)
+```
+
+**profile (L4)** — the narrative you actually read (`witness profile`):
+
+> ## default
+>
+> You've been converging on a diagnose-first way of working. A few months ago the pattern was to
+> reach for whatever unblocked the task; now you routinely catch that urge and turn to isolating the
+> mechanism before you touch anything…
+
+Nothing here is pushed into your sessions — you read it when you want it (`witness profile`), or an
+agent pulls the relevant facet on demand.
+
 ## Reading the archive
 
 Humans read the **narrative**; agents read the **structured** data. Over MCP:

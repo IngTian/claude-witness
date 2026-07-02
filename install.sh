@@ -5,35 +5,62 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-command -v go >/dev/null 2>&1 || { echo "error: 'go' not on PATH (need Go 1.25+)"; exit 1; }
+# --- pretty output (decorative only; degrades to plain text when not a TTY) ----
+if [ -t 1 ]; then
+  B=$(printf '\033[1m'); D=$(printf '\033[2m'); G=$(printf '\033[32m')
+  C=$(printf '\033[36m'); Y=$(printf '\033[33m'); R=$(printf '\033[31m'); X=$(printf '\033[0m')
+else
+  B=""; D=""; G=""; C=""; Y=""; R=""; X=""
+fi
+TOTAL=4
+step() { printf '\n%s%s[%s/%s]%s %s%s%s\n' "$C" "$B" "$1" "$TOTAL" "$X" "$B" "$2" "$X"; }
+ok()   { printf '      %s✓%s %s\n' "$G" "$X" "$1"; }
+info() { printf '      %s%s%s\n' "$D" "$1" "$X"; }
+die()  { printf '\n%s✗ %s%s\n' "$R" "$1" "$X" >&2; exit 1; }
 
+printf '\n%s╭───────────────────────────────────────────╮%s\n' "$C" "$X"
+printf '%s│%s  %sclaude-witness%s · installer               %s│%s\n' "$C" "$X" "$B" "$X" "$C" "$X"
+printf '%s│%s  %slet Claude Code witness your growth%s        %s│%s\n' "$C" "$X" "$D" "$X" "$C" "$X"
+printf '%s╰───────────────────────────────────────────╯%s\n' "$C" "$X"
+
+# --- [1/4] preflight ----------------------------------------------------------
+step 1 "Checking prerequisites"
+command -v go >/dev/null 2>&1 || die "'go' not on PATH (need Go 1.25+)"
+ok "go $(go version | awk '{print $3}' | sed 's/^go//')"
+
+# --- [2/4] build --------------------------------------------------------------
 BIN="bin/witness-$(go env GOOS)-$(go env GOARCH)"
-echo "==> building $BIN"
+step 2 "Building the binary"
+info "$BIN — one pure-Go binary (CGO_ENABLED=0)"
 CGO_ENABLED=0 go build -o "$BIN" ./cmd/witness
+ok "built $BIN"
 
-# fetch-model.sh is idempotent and size-verifying: it skips files already present
-# and intact, and re-fetches a truncated one — so always defer to it.
-echo "==> ensuring embedding model (~448MB, fetched once)"
+# --- [3/4] embedding model ----------------------------------------------------
+step 3 "Ensuring the embedding model"
+info "~448MB, fetched once; skipped if already present and intact"
 ./scripts/fetch-model.sh
+ok "model ready"
 
-echo "==> wiring hooks + MCP server"
+# --- [4/4] wire into Claude Code ----------------------------------------------
+step 4 "Wiring Claude Code hooks + MCP server"
 "$BIN" install
+ok "hooks + MCP server registered"
 
-# Optionally expose a `witness` command on PATH for the human subcommands
-# (profile, doctor, lens, cleanup). Hooks + MCP don't need this — they invoke the
-# shim directly — but it makes `witness <cmd>` work as the docs show. The launcher
-# execs the shim by its real path so GOMLX_BACKEND + CLAUDE_PLUGIN_ROOT resolve.
+# --- optional: put `witness` on PATH for the human subcommands ----------------
+# (profile, doctor, lens, cleanup). Hooks + MCP invoke the shim directly and don't
+# need this; the launcher execs the shim by its real path so GOMLX_BACKEND +
+# CLAUDE_PLUGIN_ROOT resolve. Skipped non-interactively / when already on PATH.
 ROOT="$PWD"
 if command -v witness >/dev/null 2>&1; then
-  echo "==> 'witness' already on PATH ($(command -v witness)) — leaving it"
+  info "witness already on PATH ($(command -v witness)) — leaving it"
 else
   reply=n
   if [ -t 0 ]; then
-    printf "==> add a 'witness' command to your PATH (~/.local/bin)? [Y/n] "
+    printf '\n      add a %switness%s command to your PATH (~/.local/bin)? [Y/n] ' "$B" "$X"
     read -r reply || reply=n
   fi
   case "${reply:-Y}" in
-    [Nn]*) echo "    skipped — run the CLI via ./hooks/witness.sh <cmd>" ;;
+    [Nn]*) info "skipped — run the CLI via ./hooks/witness.sh <cmd>" ;;
     *)
       mkdir -p "$HOME/.local/bin"
       cat > "$HOME/.local/bin/witness" <<EOF
@@ -42,15 +69,16 @@ else
 exec "$ROOT/hooks/witness.sh" "\$@"
 EOF
       chmod +x "$HOME/.local/bin/witness"
-      echo "    installed $HOME/.local/bin/witness"
+      ok "installed $HOME/.local/bin/witness"
       case ":$PATH:" in
         *":$HOME/.local/bin:"*) : ;;
-        *) echo "    note: ~/.local/bin is not on your PATH — add: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+        *) info "note: ~/.local/bin isn't on PATH — add: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
       esac
       ;;
   esac
 fi
 
-echo
-echo "Installed. Verify with:  witness doctor   (or: GOMLX_BACKEND=go $BIN doctor)"
-echo "Then restart Claude Code (or open /hooks) so the hooks load."
+# --- done ---------------------------------------------------------------------
+printf '\n%s%s✓ Installed.%s\n' "$G" "$B" "$X"
+printf '  %switness doctor%s   %s# verify (or: GOMLX_BACKEND=go %s doctor)%s\n' "$B" "$X" "$D" "$BIN" "$X"
+printf '  %sthen restart Claude Code (or open /hooks) so the hooks load%s\n\n' "$D" "$X"
