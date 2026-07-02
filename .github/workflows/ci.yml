@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# One in-flight run per ref; newer pushes cancel older ones.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build · vet · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Formatting is a hard gate — the whole tree must be gofmt-clean.
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # Reuse the Makefile so the CGO_ENABLED=0 + cross-compile invariant
+      # lives in exactly one place. No model or `claude` CLI needed: tests
+      # inject fake embedders and nothing uses go:embed.
+      - name: vet
+        run: make vet
+
+      - name: test
+        run: make test
+
+      # Prove the "one pure-Go binary" promise on every target we ship.
+      - name: cross-compile (darwin/linux × amd64/arm64)
+        run: make build-all
