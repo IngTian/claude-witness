@@ -47,6 +47,48 @@ Every observation/facet carries a **lens** tag:
   `witness lens enable math` makes it run on every session (alongside `default`). Lenses are shared,
   not tied to any repo, so the same `math` lens covers all your math work.
 
+#### Writing a lens
+
+A lens is a small markdown file with two prompts: **`## EXTRACT`** (per-session — mines
+observations) and **`## REVIEW`** (periodic — synthesizes them into facets), plus an optional
+`name`/`dimensions` header:
+
+```markdown
+# name: math
+# dimensions: speed, independence, proof_rigor, abstraction, confusion_tolerance
+
+## EXTRACT
+You are observing one session through a MATH-LEARNING lens. Notice things about the
+person as a mathematician — how they reason, get stuck, and climb out…
+…
+Return ONLY a JSON array. Each element:
+[{ "dimension": "proof_rigor", "observation": "…", "evidence": "…", "poignancy": 6 }]
+
+## REVIEW
+You are the reviewer for the MATH lens… synthesize observations into few, sharp,
+falsifiable facets; flag only sustained change…
+Return ONLY a JSON array. Each element:
+[{ "dimension": "…", "key": "…", "value": "…", "confidence": 0.7, "because_of": ["obs_…"], "contradicts_prior": false }]
+```
+
+The one rule to remember: each section is used **verbatim as the system prompt** and *replaces*
+the built-in `default` prompts — it doesn't extend them — so each must be **self-contained,
+including its output JSON schema** (the tool appends the transcript / observations as the user
+message, but injects no schema for you).
+
+A **complete, copy-paste-ready** lens lives at
+[`prompts/lens/example.md`](prompts/lens/example.md) — the fastest way to start is to copy it and
+rewrite the dimensions and prose for your domain:
+
+```sh
+cp "$CLAUDE_PLUGIN_ROOT/prompts/lens/example.md" ./math-lens.md   # edit it, then:
+witness lens register math ./math-lens.md    # copies the definition into your store (a snapshot)
+witness lens enable  math                     # start running it on every session
+```
+
+`register` stores a **copy** — editing the original afterward has no effect until you re-register.
+`enable` is the separate switch that makes it actually run.
+
 ## Example: one moment, end to end
 
 Say a session contains this exchange (fictional):
