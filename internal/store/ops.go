@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 )
 
@@ -269,14 +268,10 @@ func (s *Store) WorkerLock() (unlock func(), ok bool) {
 	if err != nil {
 		return func() {}, false
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		return func() {}, false
-	}
-	return func() {
-		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		f.Close()
-	}, true
+	// flockFile is platform-specific (flock on Unix, LockFileEx on Windows) — see
+	// flock_unix.go / flock_windows.go. It takes an exclusive, non-blocking lock and
+	// returns an unlock func that also closes f.
+	return flockFile(f)
 }
 
 // --- observations ---------------------------------------------------------
