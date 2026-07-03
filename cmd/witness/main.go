@@ -603,13 +603,19 @@ func cmdDoctor() error {
 	cfg := st.LoadConfig()
 	fmt.Printf("  runner: %s | models: triage=%s distill=%s | review_every=%d poignancy=%d\n",
 		cfg.Runner, cfg.TriageModel, cfg.DistillModel, cfg.ReviewEvery, cfg.ReviewPoignancy)
+	// Don't short-circuit on a bad OpenCode model: the embedder check below is
+	// doctor's core purpose (verify the model loads and EN/ZH retrieval works),
+	// and it must run even when distillation is misconfigured. Remember the
+	// failure and surface it as the exit code at the very end.
+	var deferredErr error
 	if strings.EqualFold(cfg.Runner, "opencode") {
 		fmt.Print("  opencode models: ")
 		if err := distill.ValidateOpenCodeModels(context.Background(), cfg.TriageModel, cfg.DistillModel); err != nil {
 			fmt.Printf("INVALID (%v)\n", err)
-			return err
+			deferredErr = err
+		} else {
+			fmt.Println("OK")
 		}
-		fmt.Println("OK")
 	}
 
 	stat := st.Stats()
@@ -644,5 +650,5 @@ func cmdDoctor() error {
 	fmt.Printf("OK (dim=%d)\n", len(en))
 	fmt.Printf("  EN<->ZH cosine: %.4f | EN<->unrelated: %.4f (want first > second)\n",
 		embed.Cosine(en, zh), embed.Cosine(en, un))
-	return nil
+	return deferredErr
 }
