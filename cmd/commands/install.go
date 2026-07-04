@@ -418,7 +418,7 @@ func cmdInstallOpenCode() error {
 	if err := os.MkdirAll(plugins, 0o755); err != nil {
 		return err
 	}
-	pluginPath := filepath.Join(plugins, "claude-witness.js")
+	pluginPath := filepath.Join(plugins, "witness.js")
 	if err := writeFileAtomic(pluginPath, []byte(opencodeplugin.Source(shim))); err != nil {
 		return err
 	}
@@ -461,7 +461,7 @@ func cmdUninstallClaude() error {
 
 func cmdUninstallOpenCode() error {
 	dir := opencodeDir()
-	pluginPath := filepath.Join(dir, "plugins", "claude-witness.js")
+	pluginPath := filepath.Join(dir, "plugins", "witness.js")
 	config := opencodeConfigPath()
 	configUpdated := false
 	if data, err := os.ReadFile(config); err == nil {

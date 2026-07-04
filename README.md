@@ -222,7 +222,7 @@ OpenCode support has two pieces:
 
 - A plugin captures OpenCode message events into witness L0, reconciles OpenCode's SQLite DB on idle,
   and kicks background distillation through that import path without waiting. From-source installs write
-  a local plugin to `~/.config/opencode/plugins/claude-witness.js`; published installs can use the npm
+  a local plugin to `~/.config/opencode/plugins/witness.js`; published installs can use the npm
   plugin `@witness-ai/opencode`.
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
