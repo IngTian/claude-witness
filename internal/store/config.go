@@ -13,6 +13,7 @@ import (
 // (key = value); we avoid a TOML dependency to keep the binary lean. Unknown
 // keys are ignored; missing file = all defaults.
 type Config struct {
+	Runner          string // "claude" (default) or "opencode" for headless distillation calls
 	TriageModel     string // model for cheap per-session mining ("" = claude -p default, e.g. on Bedrock)
 	DistillModel    string // model for the reviewer ("" = claude -p default)
 	ReviewEvery     int    // run the reviewer after this many distilled sessions since last review
@@ -25,6 +26,7 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
+		Runner:          "claude",
 		TriageModel:     "", // empty => let `claude -p` use the environment default model
 		DistillModel:    "",
 		ReviewEvery:     5,
@@ -51,6 +53,10 @@ func (s *Store) LoadConfig() Config {
 		k = strings.TrimSpace(k)
 		v = strings.Trim(strings.TrimSpace(v), `"`)
 		switch k {
+		case "runner":
+			if v != "" {
+				c.Runner = v
+			}
 		case "triage_model":
 			c.TriageModel = v
 		case "distill_model":
@@ -72,6 +78,87 @@ func (s *Store) LoadConfig() Config {
 		}
 	}
 	return c
+}
+
+// SetRunner writes `runner = "<runner>"` into config.toml, creating or replacing
+// the existing line. Used by `install` to bind the distillation runtime to the
+// integration that was just wired (Claude Code → claude, OpenCode → opencode) so
+// the user does not have to hand-edit config. Other lines (comments, lenses,
+// other keys) are preserved verbatim. The value is quoted to match the format
+// EnsureConfigFile writes and to stay consistent with other string fields.
+func (s *Store) SetRunner(runner string) error {
+	data, err := os.ReadFile(s.ConfigPath())
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	var kept []string
+	set := false
+	if len(data) > 0 {
+		for _, line := range strings.Split(string(data), "\n") {
+			if isRunnerLine(line) {
+				if !set {
+					kept = append(kept, fmt.Sprintf("runner = %q", runner))
+					set = true
+				}
+				continue // drop any duplicate runner lines
+			}
+			kept = append(kept, line)
+		}
+	}
+	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
+		kept = kept[:len(kept)-1]
+	}
+	if !set {
+		kept = append(kept, fmt.Sprintf("runner = %q", runner))
+	}
+	out := strings.Join(kept, "\n") + "\n"
+	return writeAtomic(s.ConfigPath(), []byte(out))
+}
+
+// EnsureConfigFile creates config.toml with a full commented template if it does
+// not yet exist, so a first-time install exposes every tunable (not just runner)
+// and the user can see what to edit. Existing files are never overwritten —
+// later installs only refresh `runner` via SetRunner, leaving user edits intact.
+// Forward-compatible: old configs without some fields simply fall back to defaults.
+func (s *Store) EnsureConfigFile() error {
+	if _, err := os.Stat(s.ConfigPath()); err == nil {
+		return nil // already present; never clobber user edits
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	tpl := `# claude-witness configuration — all fields optional, shown with defaults.
+# Docs: https://github.com/IngTian/claude-witness#configuration
+
+# Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
+# (uses ` + "`opencode run`" + `). Bound automatically by ` + "`witness install`" + `.
+runner = "claude"
+
+# Models for the per-session miner and the periodic reviewer. Empty = use the
+# ` + "`claude -p`" + ` / ` + "`opencode run`" + ` default. With runner = opencode, use OpenCode
+# model names such as "openai/gpt-5.5".
+triage_model  = ""
+distill_model = ""
+
+# Run the reviewer after this many distilled sessions since the last review...
+review_every = 5
+# ...or once accumulated observation poignancy crosses this threshold (0 = off).
+review_poignancy = 30
+
+# Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
+# lens = math
+`
+	return writeAtomic(s.ConfigPath(), []byte(tpl))
+}
+
+// isRunnerLine reports whether a config line is a `runner = ...` assignment
+// (comments and blank lines are not).
+func isRunnerLine(line string) bool {
+	t := strings.TrimSpace(line)
+	if t == "" || strings.HasPrefix(t, "#") {
+		return false
+	}
+	k, _, ok := strings.Cut(t, "=")
+	return ok && strings.TrimSpace(k) == "runner"
 }
 
 // --- review cadence ----------------------------------------------------------
@@ -135,6 +222,18 @@ func (s *Store) metaStr(key string) string {
 	var v string
 	_ = s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
 	return v
+}
+
+// MetaString exposes small scalar bookkeeping to importers that need their own
+// durable watermarks without owning schema migrations.
+func (s *Store) MetaString(key string) string { return s.metaStr(key) }
+
+// SetMetaString stores a small scalar watermark under key.
+func (s *Store) SetMetaString(key, value string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO meta(key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
 }
 
 func (s *Store) metaInt(key string) int64 {

@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # One-command install for claude-witness (working-copy / from-source).
-# Builds the binary, fetches the embedding model once, and wires the Claude Code
-# hooks + MCP server. Idempotent — safe to re-run after a `git pull`.
+# Builds the binary, fetches the embedding model once, and wires the selected
+# agent integration (Claude Code or OpenCode). Idempotent — safe to re-run after
+# a `git pull`.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
+TARGET="${1:-}"
+if [[ "$TARGET" != "claude" && "$TARGET" != "opencode" ]]; then
+  echo "usage: ./install.sh <claude|opencode>" >&2
+  exit 1
+fi
 
 # --- pretty output (decorative only; degrades to plain text when not a TTY) ----
 if [ -t 1 ]; then
@@ -41,10 +47,14 @@ info "~448MB, fetched once; skipped if already present and intact"
 ./scripts/fetch-model.sh
 ok "model ready"
 
-# --- [4/4] wire into Claude Code ----------------------------------------------
-step 4 "Wiring Claude Code hooks + MCP server"
-"$BIN" install
-ok "hooks + MCP server registered"
+# --- [4/4] wire into the selected agent runtime --------------------------------
+case "$TARGET" in
+  claude)   LABEL="Claude Code hooks + MCP server" ;;
+  opencode) LABEL="OpenCode plugin + MCP server" ;;
+esac
+step 4 "Wiring $LABEL"
+"$BIN" install "$TARGET"
+ok "$LABEL registered"
 
 # --- optional: put `witness` on PATH for the human subcommands ----------------
 # (profile, doctor, lens, cleanup). Hooks + MCP invoke the shim directly and don't
@@ -81,4 +91,7 @@ fi
 # --- done ---------------------------------------------------------------------
 printf '\n%s%s✓ Installed.%s\n' "$G" "$B" "$X"
 printf '  %switness doctor%s   %s# verify (or: GOMLX_BACKEND=go %s doctor)%s\n' "$B" "$X" "$D" "$BIN" "$X"
-printf '  %sthen restart Claude Code (or open /hooks) so the hooks load%s\n\n' "$D" "$X"
+case "$TARGET" in
+  claude)   printf '  %sthen restart Claude Code (or open /hooks) so the hooks load%s\n\n' "$D" "$X" ;;
+  opencode) printf '  %sthen restart OpenCode so the plugin and MCP server load%s\n\n' "$D" "$X" ;;
+esac

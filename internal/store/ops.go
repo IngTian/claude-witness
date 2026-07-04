@@ -20,6 +20,57 @@ func (s *Store) AppendRaw(r RawRecord) error {
 	return err
 }
 
+// ApplyRawImport atomically commits a raw import batch and its importer-owned
+// watermark. replace=true rebuilds the session's L0 and resets the distillation
+// progress, which is required for mutable sources that can insert or edit prior
+// turns after an earlier import.
+func (s *Store) ApplyRawImport(meta SessionMeta, records []RawRecord, stateKey, stateValue string, replace bool) (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+
+	if replace {
+		if _, err = tx.Exec(`DELETE FROM raw WHERE session = ?`, meta.Session); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM progress WHERE session = ?`, meta.Session); err != nil {
+			return err
+		}
+	}
+	if meta.Session != "" {
+		if _, err = tx.Exec(
+			`INSERT INTO session_meta(session, cwd, started) VALUES (?, ?, ?)
+			 ON CONFLICT(session) DO UPDATE SET cwd = excluded.cwd, started = excluded.started`,
+			meta.Session, meta.Cwd, meta.Started); err != nil {
+			return err
+		}
+	}
+	stmt, err := tx.Prepare(`INSERT INTO raw(session, seq, ts, role, effort, text) VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, r := range records {
+		if _, err = stmt.Exec(r.Session, r.Seq, r.TS, r.Role, r.Effort, r.Text); err != nil {
+			return err
+		}
+	}
+	if stateKey != "" {
+		if _, err = tx.Exec(
+			`INSERT INTO meta(key, value) VALUES (?, ?)
+			 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, stateKey, stateValue); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // ReadRaw returns a session's full raw log in capture order.
 func (s *Store) ReadRaw(session string) ([]RawRecord, error) {
 	rows, err := s.db.Query(
@@ -48,17 +99,44 @@ func (s *Store) RawCount(session string) int {
 	return n
 }
 
+func (s *Store) LastRawTS() string {
+	var ts string
+	_ = s.db.QueryRow(`SELECT COALESCE(MAX(ts), '') FROM raw`).Scan(&ts)
+	return ts
+}
+
+func (s *Store) LastDistilledRawTS() string {
+	var ts string
+	_ = s.db.QueryRow(`
+		SELECT COALESCE(MAX(r.ts), '')
+		  FROM raw r
+		  JOIN progress p ON p.session = r.session
+		 WHERE r.seq < p.distilled`).Scan(&ts)
+	return ts
+}
+
 // NextSeq returns the next per-session ordinal (== current record count).
 func (s *Store) NextSeq(session string) int { return s.RawCount(session) }
 
 // RecordMeta writes session meta once (idempotent: only on first sight).
+//
+// NOTE: retained-but-currently-unused on the Claude Code path — CC capture never
+// calls this, so session_meta.cwd stays empty for CC sessions (only the OpenCode
+// import/capture path, via ApplyRawImport, populates it). The `cwd` column was
+// introduced for repo-scoped lenses ("which repo is this session in → apply that
+// repo's lens"), but that idea was deliberately dropped: lenses are global and
+// nothing is read from a repo, so a cloned repo can't inject a prompt (see
+// internal/lens/lens.go). Kept for the OpenCode writer + a possible future
+// consumer; nothing reads cwd downstream today (ReadMeta has no callers).
 func (s *Store) RecordMeta(m SessionMeta) {
 	_, _ = s.db.Exec(
 		`INSERT OR IGNORE INTO session_meta(session, cwd, started) VALUES (?, ?, ?)`,
 		m.Session, m.Cwd, m.Started)
 }
 
-// ReadMeta returns a session's meta (zero value if absent).
+// ReadMeta returns a session's meta (zero value if absent). Currently has no
+// callers — see the RecordMeta note above (cwd/session_meta is retained for the
+// OpenCode writer and possible future use, not read on any live path).
 func (s *Store) ReadMeta(session string) SessionMeta {
 	m := SessionMeta{Session: session}
 	_ = s.db.QueryRow(`SELECT cwd, started FROM session_meta WHERE session = ?`, session).
@@ -202,17 +280,25 @@ func (s *Store) SetNextAttempt(session string, at time.Time) error {
 }
 
 // PendingSessions returns sessions whose L0 has grown past the distillation
-// watermark — i.e. there are undistilled records. Keying on the watermark (not a
-// mere marker) means a RESUMED session whose log gains new turns is picked up again.
+// watermark, or that have staged active observations waiting to be drained.
+// Keying on the watermark (not a mere marker) means a RESUMED session whose log
+// gains new turns is picked up again.
 func (s *Store) PendingSessions() ([]string, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	rows, err := s.db.Query(
-		`SELECT l.session
-		   FROM (SELECT session, COUNT(*) AS c FROM raw GROUP BY session) l
-		   LEFT JOIN progress p ON p.session = l.session
-		  WHERE l.c > COALESCE(p.distilled, 0)
-		    AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
-		  ORDER BY l.session`, now)
+		`SELECT session FROM (
+		   SELECT l.session
+		     FROM (SELECT session, COUNT(*) AS c FROM raw GROUP BY session) l
+		     LEFT JOIN progress p ON p.session = l.session
+		    WHERE l.c > COALESCE(p.distilled, 0)
+		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
+		   UNION
+		   SELECT st.session
+		     FROM staged st
+		     LEFT JOIN progress p ON p.session = st.session
+		    WHERE COALESCE(st.session, '') != ''
+		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
+		  ) ORDER BY session`, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -249,11 +335,18 @@ func (s *Store) Stats() Stats {
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&st.Observations)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM facets`).Scan(&st.Facets)
 	_ = s.db.QueryRow(
-		`SELECT COUNT(*) FROM (SELECT l.session
-		   FROM (SELECT session, COUNT(*) c FROM raw GROUP BY session) l
-		   LEFT JOIN progress p ON p.session = l.session
-		  WHERE l.c > COALESCE(p.distilled,0)
-		    AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, now).Scan(&st.Pending)
+		`SELECT COUNT(*) FROM (
+		   SELECT l.session
+		     FROM (SELECT session, COUNT(*) c FROM raw GROUP BY session) l
+		     LEFT JOIN progress p ON p.session = l.session
+		    WHERE l.c > COALESCE(p.distilled,0)
+		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?)
+		   UNION
+		   SELECT st.session
+		     FROM staged st
+		     LEFT JOIN progress p ON p.session = st.session
+		    WHERE COALESCE(st.session, '') != ''
+		      AND (COALESCE(p.next_attempt,'') = '' OR COALESCE(p.next_attempt,'') <= ?))`, now, now).Scan(&st.Pending)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM progress WHERE next_attempt != '' AND next_attempt > ?`, now).Scan(&st.BackedOff)
 	st.LastReview = s.metaStr("review_ts")
 	return st
@@ -264,7 +357,18 @@ func (s *Store) Stats() Stats {
 // worker is already draining the queue. Kept as a filesystem flock (independent
 // of the DB) so it works the same regardless of storage backend.
 func (s *Store) WorkerLock() (unlock func(), ok bool) {
-	path := filepath.Join(s.Root, ".worker.lock")
+	return s.lockFile(".worker.lock")
+}
+
+// OpenCodeSyncLock serializes imports from OpenCode's session database. The
+// importer is watermark-based, but concurrent importers can otherwise read the
+// same count and append the same text rows twice.
+func (s *Store) OpenCodeSyncLock() (unlock func(), ok bool) {
+	return s.lockFile(".opencode-sync.lock")
+}
+
+func (s *Store) lockFile(name string) (unlock func(), ok bool) {
+	path := filepath.Join(s.Root, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return func() {}, false
