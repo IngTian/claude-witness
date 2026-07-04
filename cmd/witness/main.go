@@ -26,73 +26,304 @@ import (
 	runtimeclaude "github.com/IngTian/claude-witness/internal/runtimes/claude"
 	opencodeimport "github.com/IngTian/claude-witness/internal/runtimes/opencode"
 	"github.com/IngTian/claude-witness/internal/store"
+	"github.com/spf13/cobra"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		// Only the human-facing commands are advertised. The rest are internal entry
-		// points invoked by Claude Code, never typed: capture/session-start/session-end
-		// (hooks), worker (self-spawned via spawnDetached), and mcp (the server process
-		// Claude Code launches from the registered shim command).
-		fmt.Fprintln(os.Stderr, "usage: witness <doctor|profile|review|lens|import|distill|opencode|cleanup|install|uninstall> [args]")
-		os.Exit(2)
-	}
 	// Belt-and-suspenders recursion guard (the shim also checks): never act when
 	// running inside a witness-driven `claude -p`.
-	if os.Getenv("WITNESS_WORKER") == "1" && os.Args[1] != "doctor" {
+	if len(os.Args) > 1 && os.Getenv("WITNESS_WORKER") == "1" && os.Args[1] != "doctor" {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 		return
 	}
-
-	var err error
-	switch os.Args[1] {
-	// Internal entry points (Claude Code / hooks / self-spawn) — not in usage.
-	case "capture":
-		err = cmdCapture(os.Args[2:])
-	case "session-start":
-		err = cmdSessionStart()
-	case "session-end":
-		err = cmdSessionEnd()
-	case "worker":
-		err = cmdWorker(os.Args[2:])
-	case "mcp":
-		err = cmdMCP()
-	case "opencode-sync":
-		err = cmdOpenCodeSync(os.Args[2:], true)
-	// Human commands.
-	case "profile":
-		err = cmdProfile(os.Args[2:])
-	case "review":
-		err = cmdReview()
-	case "lens":
-		err = cmdLens(os.Args[2:])
-	case "import":
-		err = cmdImport(os.Args[2:])
-	case "distill":
-		err = cmdDistill(os.Args[2:])
-	case "opencode":
-		err = cmdOpenCode(os.Args[2:])
-	case "install":
-		err = cmdInstall(os.Args[2:])
-	case "uninstall":
-		err = cmdUninstall(os.Args[2:])
-	case "cleanup":
-		err = cmdCleanup()
-	case "doctor":
-		err = cmdDoctor()
-	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q\n", os.Args[1])
-		os.Exit(2)
-	}
-	if err != nil {
-		// Hooks must never break the session: log to stderr, exit 0 for capture-ish
-		// paths. Only doctor/mcp surface failures.
+	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "witness:", err)
-		switch os.Args[1] {
-		case "doctor", "mcp", "worker", "lens", "profile", "review", "import", "distill", "opencode", "install", "uninstall", "cleanup":
+		if exitsOnError(os.Args) {
 			os.Exit(1)
 		}
 	}
+
+}
+
+func exitsOnError(args []string) bool {
+	if len(args) < 2 {
+		return true
+	}
+	switch args[1] {
+	case "doctor", "mcp", "worker", "lens", "profile", "review", "import", "distill", "opencode", "install", "uninstall", "cleanup":
+		return true
+	default:
+		return false
+	}
+}
+
+func newRootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:           "witness",
+		Short:         "Capture, distill, and serve a person-centric growth archive.",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Long: strings.TrimSpace(`witness records raw assistant-session turns, distills them into observations and facets, and serves derived profiles through CLI and MCP.
+
+The profile is collect-only and pull-only: witness never injects content into sessions. Humans read it with 'witness profile'; agents read it through MCP tools.`),
+	}
+	root.AddCommand(
+		newDoctorCmd(),
+		newProfileCmd(),
+		newReviewCmd(),
+		newLensCmd(),
+		newImportCmd(),
+		newDistillCmd(),
+		newOpenCodeCmd(),
+		newCleanupCmd(),
+		newInstallCmd(),
+		newUninstallCmd(),
+		newInternalCaptureCmd(),
+		newInternalSessionStartCmd(),
+		newInternalSessionEndCmd(),
+		newInternalWorkerCmd(),
+		newInternalMCPCmd(),
+		newInternalOpenCodeSyncCmd(),
+	)
+	return root
+}
+
+func newDoctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Run a health check for the archive and embedder.",
+		Long:  "Run a health check for configuration, archive statistics, worker queue state, model availability, and multilingual embedder retrieval quality.",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return cmdDoctor()
+		},
+	}
+}
+
+func newProfileCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "profile [lens]",
+		Short: "Print the narrative profile.",
+		Long:  "Print the L4 markdown profile. With no lens, prints the unified cross-lens profile; pass a lens name to read that lens-specific profile.",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cmdProfile(args)
+		},
+	}
+}
+
+func newReviewCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "review",
+		Short: "Force an L2 review and regenerate profiles.",
+		Long:  "Force an L2 review from existing observations, update facets, and regenerate the derived L4 markdown profiles. This writes derived data but does not capture new raw turns.",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return cmdReview()
+		},
+	}
+}
+
+func newLensCmd() *cobra.Command {
+	lensCmd := &cobra.Command{
+		Use:   "lens",
+		Short: "Manage global observation lenses.",
+		Long:  "Manage the central lens registry. Registered and enabled lenses run globally across every session alongside the always-on default lens.",
+	}
+	lensCmd.AddCommand(
+		&cobra.Command{
+			Use:   "register <name> <file>",
+			Short: "Register or replace a lens definition.",
+			Long:  "Copy a lens markdown definition into the witness store. Later edits to the source file do not affect the registered snapshot until you register it again.",
+			Args:  cobra.ExactArgs(2),
+			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"register"}, args...)) },
+		},
+		&cobra.Command{
+			Use:   "deregister <name>",
+			Short: "Remove a registered lens definition.",
+			Args:  cobra.ExactArgs(1),
+			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"deregister"}, args...)) },
+		},
+		&cobra.Command{
+			Use:   "enable <name>",
+			Short: "Enable a registered lens for every session.",
+			Args:  cobra.ExactArgs(1),
+			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"enable"}, args...)) },
+		},
+		&cobra.Command{
+			Use:   "disable <name>",
+			Short: "Stop running a lens on new distillation work.",
+			Args:  cobra.ExactArgs(1),
+			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"disable"}, args...)) },
+		},
+		&cobra.Command{
+			Use:   "list",
+			Short: "List registered lenses and enabled state.",
+			Args:  cobra.NoArgs,
+			RunE:  func(_ *cobra.Command, _ []string) error { return cmdLens([]string{"list"}) },
+		},
+	)
+	return lensCmd
+}
+
+func newImportCmd() *cobra.Command {
+	var agent string
+	var quiet bool
+	c := &cobra.Command{
+		Use:   "import --agent <claude|opencode>",
+		Short: "Import agent session data and kick background distillation.",
+		Long:  "Import agent data into L0 raw records and kick the background distillation worker when work is pending. OpenCode imports from its local SQLite session database; Claude relies on already-captured hook data.",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			args := []string{"--agent", agent}
+			if quiet {
+				args = append(args, "--quiet")
+			}
+			return cmdImport(args)
+		},
+	}
+	c.Flags().StringVar(&agent, "agent", "", "agent to import from: claude or opencode")
+	c.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
+	return c
+}
+
+func newDistillCmd() *cobra.Command {
+	distillCmd := &cobra.Command{
+		Use:   "distill",
+		Short: "Manage the background distillation worker.",
+		Long:  "Start, inspect, or stop the single-flight worker that turns raw turns into observations, reviews facets when due, and regenerates profiles.",
+	}
+	var quiet bool
+	start := &cobra.Command{
+		Use:   "start",
+		Short: "Kick the worker in the background.",
+		Long:  "Kick the distillation worker in the background. If another worker already holds the lock, the new process exits and queued work remains durable on disk.",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			args := []string{"start"}
+			if quiet {
+				args = append(args, "--quiet")
+			}
+			return cmdDistill(args)
+		},
+	}
+	start.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
+	distillCmd.AddCommand(start)
+	distillCmd.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "Show worker and queue status.",
+		Long:  "Show worker state, current session, archive statistics, pending/backoff counts, and raw/distilled freshness timestamps.",
+		Args:  cobra.NoArgs,
+		RunE:  func(_ *cobra.Command, _ []string) error { return cmdDistill([]string{"status"}) },
+	})
+	distillCmd.AddCommand(&cobra.Command{
+		Use:   "stop",
+		Short: "Request the running worker to stop.",
+		Long:  "Set the worker stop flag and send SIGTERM to the running worker process when it is still alive.",
+		Args:  cobra.NoArgs,
+		RunE:  func(_ *cobra.Command, _ []string) error { return cmdDistill([]string{"stop"}) },
+	})
+	return distillCmd
+}
+
+func newOpenCodeCmd() *cobra.Command {
+	opencodeCmd := &cobra.Command{
+		Use:   "opencode",
+		Short: "OpenCode-specific debug and legacy commands.",
+		Long:  "OpenCode-specific debug and legacy commands. For daily imports, prefer 'witness import --agent opencode'.",
+	}
+	var wait bool
+	syncCmd := &cobra.Command{
+		Use:   "sync [session_id...]",
+		Short: "Legacy/debug OpenCode import path.",
+		Long:  "Incrementally import OpenCode sessions, optionally limited to session IDs. Without --wait, kicks the worker in the background; with --wait, runs pending work before returning.",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			callArgs := []string{"sync"}
+			if wait {
+				callArgs = append(callArgs, "--wait")
+			}
+			callArgs = append(callArgs, args...)
+			return cmdOpenCode(callArgs)
+		},
+	}
+	syncCmd.Flags().BoolVar(&wait, "wait", false, "run pending worker work before returning")
+	opencodeCmd.AddCommand(syncCmd)
+	return opencodeCmd
+}
+
+func newCleanupCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cleanup",
+		Short: "Interactively prune old raw transcripts.",
+		Long:  "Interactively delete old L0 raw messages for idle sessions while keeping derived observations, facets, and profiles. This is never automatic and asks for confirmation before deleting.",
+		Args:  cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return cmdCleanup()
+		},
+	}
+}
+
+func newInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install [claude|opencode|all]",
+		Short: "Install witness integrations.",
+		Long:  "Install Claude Code hooks/MCP, OpenCode plugin/MCP, or both. With no target, installs the Claude Code integration for compatibility.",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cmdInstall(args)
+		},
+	}
+}
+
+func newUninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall [claude|opencode|all]",
+		Short: "Remove witness integrations without deleting data.",
+		Long:  "Remove Claude Code hooks/MCP, OpenCode plugin/MCP, or both. The witness data store is left untouched. With no target, removes the Claude Code integration for compatibility.",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			return cmdUninstall(args)
+		},
+	}
+}
+
+func newInternalCaptureCmd() *cobra.Command {
+	var agent string
+	c := &cobra.Command{
+		Use:    "capture",
+		Short:  "Internal hook entry point for raw capture.",
+		Hidden: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			args := []string{}
+			if agent != "" {
+				args = append(args, "--agent", agent)
+			}
+			return cmdCapture(args)
+		},
+	}
+	c.Flags().StringVar(&agent, "agent", string(runtimes.AgentClaude), "internal capture agent")
+	return c
+}
+
+func newInternalSessionStartCmd() *cobra.Command {
+	return &cobra.Command{Use: "session-start", Hidden: true, Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error { return cmdSessionStart() }}
+}
+
+func newInternalSessionEndCmd() *cobra.Command {
+	return &cobra.Command{Use: "session-end", Hidden: true, Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error { return cmdSessionEnd() }}
+}
+
+func newInternalWorkerCmd() *cobra.Command {
+	return &cobra.Command{Use: "worker", Hidden: true, RunE: func(_ *cobra.Command, args []string) error { return cmdWorker(args) }}
+}
+
+func newInternalMCPCmd() *cobra.Command {
+	return &cobra.Command{Use: "mcp", Hidden: true, Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error { return cmdMCP() }}
+}
+
+func newInternalOpenCodeSyncCmd() *cobra.Command {
+	return &cobra.Command{Use: "opencode-sync [--wait] [session_id...]", Hidden: true, DisableFlagParsing: true, RunE: func(_ *cobra.Command, args []string) error { return cmdOpenCodeSync(args, true) }}
 }
 
 // cmdCapture writes one raw record from the hook event. Pure plumbing; no LLM.
