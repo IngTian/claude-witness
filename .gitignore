@@ -44,3 +44,5 @@ assets/e5-small/*.onnx_data
 /witness.exe
 *.test
 *.exe
+# Release archives (produced by `make package-windows`, attached to releases)
+*.zip
