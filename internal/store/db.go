@@ -58,6 +58,51 @@ func openDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// Export writes a consistent, single-file snapshot of the archive database to
+// dst via SQLite `VACUUM INTO`. The snapshot folds the WAL into one plain .db
+// file with NO -wal/-shm sidecars, so it is safe to copy or hand to a cloud
+// syncer — unlike the live data dir, where a syncer racing the WAL can corrupt
+// the DB. VACUUM INTO reads a consistent view even while the worker is writing,
+// so no worker-stop is needed. The snapshot is itself a normal witness.db: to
+// restore, stop witness and copy it into the data dir (or point WITNESS_HOME at
+// its folder).
+//
+// Scope: this snapshots the DATABASE only — L0 raw, L1 observations, L2 facets,
+// config, and the distill queue, i.e. the source of truth. The L4 narrative
+// profile (profile/*.md) is a DERIVED cache regenerated from L2 facets, so it is
+// deliberately NOT exported; after a restore, `witness review` rebuilds it.
+//
+// dst must not already exist (VACUUM INTO requires a fresh path, and refusing to
+// overwrite avoids clobbering a prior backup); callers pass force to remove an
+// existing file first.
+func (s *Store) Export(dst string, force bool) error {
+	if dst == "" {
+		return fmt.Errorf("export: destination path is required")
+	}
+	if _, err := os.Stat(dst); err == nil {
+		if !force {
+			return fmt.Errorf("export: %s already exists (use --force to overwrite)", dst)
+		}
+		if err := os.Remove(dst); err != nil {
+			return fmt.Errorf("export: remove existing %s: %w", dst, err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("export: stat %s: %w", dst, err)
+	}
+	if dir := filepath.Dir(dst); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("export: mkdir %s: %w", dir, err)
+		}
+	}
+	// VACUUM INTO takes the destination as a bound string parameter.
+	if _, err := s.db.Exec("VACUUM INTO ?", dst); err != nil {
+		return fmt.Errorf("export: vacuum into %s: %w", dst, err)
+	}
+	// The snapshot carries the same private growth data; keep it 0600.
+	_ = os.Chmod(dst, 0o600)
+	return nil
+}
+
 // migrate brings the schema from the database's current user_version up to
 // schemaVersion: a guarded legacy rename (if needed) followed by the full current
 // schema applied idempotently.
