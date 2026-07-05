@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/IngTian/claude-witness/internal/bundle"
 	"github.com/gomlx/gomlx/backends"
 	_ "github.com/gomlx/gomlx/backends/simplego" // register pure-Go "go" backend
 	"github.com/gomlx/gomlx/pkg/core/graph"
@@ -42,16 +43,13 @@ type Embedder struct {
 	mu      sync.Mutex
 }
 
-// assetsDir resolves where the bundled model lives: WITNESS_ASSETS, else
-// <plugin root>/assets/e5-small. modelDir must contain model.onnx + tokenizer.json.
+// assetsDir resolves where the bundled model lives. modelDir must contain
+// model.onnx + tokenizer.json. Resolution (bundle.Dir): WITNESS_ASSETS, else
+// $CLAUDE_PLUGIN_ROOT/assets/e5-small, else exe-relative (so a Windows exec-form
+// hook, which has no shell to export CLAUDE_PLUGIN_ROOT, still finds the model
+// beside the installed binary), else the cwd-relative dev fallback.
 func assetsDir() string {
-	if d := os.Getenv("WITNESS_ASSETS"); d != "" {
-		return d
-	}
-	if root := os.Getenv("CLAUDE_PLUGIN_ROOT"); root != "" {
-		return filepath.Join(root, "assets", "e5-small")
-	}
-	return filepath.Join("assets", "e5-small")
+	return bundle.Dir(filepath.Join("assets", "e5-small"), "WITNESS_ASSETS")
 }
 
 // New loads the embedder from the assets directory.
