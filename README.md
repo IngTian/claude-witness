@@ -155,7 +155,7 @@ Humans read the **narrative**; agents read the **structured** data. Over MCP:
 
 ## Commands
 
-`witness <doctor | profile | facets | observations | review | lens | import | distill | cleanup | install | uninstall>` (capture,
+`witness <doctor | profile | facets | observations | review | lens | import | distill | cleanup | export | install | uninstall>` (capture,
 the worker, and the MCP server are internal entry points invoked by Claude Code/OpenCode, not typed
 by hand):
 
@@ -171,6 +171,7 @@ by hand):
 - `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
 - `witness distill start|status|stop` — manage the background distillation worker.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
+- `witness export <path>` — write a consistent single-file snapshot of the archive (safe to back up / cloud-sync).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).
 
 ## Single binary, no runtime
@@ -271,6 +272,19 @@ them with `witness cleanup` (which never touches your observations or profile).
 Everything lives under `~/.local/share/claude-witness/` (override with `WITNESS_HOME`), is `0700`
 (the DB and profile files `0600`), and never leaves your machine. The repo ships the framework,
 schema, and prompts — **never anyone's archive.**
+
+**Backup / sync.** To back the archive up or sync it (iCloud/Dropbox/Drive), use `witness export
+<path>` — it writes a single consistent `.db` snapshot you can point a syncer at. Do **not** sync the
+live data directory directly: the database runs in WAL mode (`.db` + `-wal` + `-shm`), and a syncer
+racing those files can corrupt it. Wire it up yourself, e.g. a cron/launchd job:
+
+```sh
+witness export ~/Dropbox/witness-backup.db --force   # consistent snapshot, safe to sync
+```
+
+To restore, stop witness and copy a snapshot into your data dir as `witness.db` (or set `WITNESS_HOME`
+to its folder), then run `witness review` — the snapshot holds the source of truth (raw turns,
+observations, facets); the narrative profile is regenerated from it.
 
 ## License
 
