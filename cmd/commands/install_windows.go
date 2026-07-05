@@ -43,6 +43,12 @@ func resolveClaudeInstall() (hookInvocation, error) {
 		return hookInvocation{}, err
 	}
 	fmt.Printf("witness installed to %s\n", root)
+	// Put the install dir on the user PATH so `witness` runs from any new shell.
+	// Best-effort: the hooks use the absolute exe path and work regardless, so a
+	// PATH failure only affects the interactive `witness` command.
+	if err := ensureOnUserPath(root); err != nil {
+		fmt.Fprintf(os.Stderr, "witness: could not update PATH (add %s manually): %v\n", root, err)
+	}
 	return execInvocation(exe), nil
 }
 

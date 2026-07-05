@@ -219,6 +219,43 @@ func TestRemoveWitnessHooksExecForm(t *testing.T) {
 	}
 }
 
+// TestAppendToPathValue locks the PATH-edit contract used by the Windows
+// registry path: idempotent (case-insensitive, Windows paths), preserves the
+// existing value VERBATIM including %VAR% tokens (the caller writes REG_EXPAND_SZ,
+// so we must never flatten — the setx bug), and handles empty / trailing-';'.
+func TestAppendToPathValue(t *testing.T) {
+	dir := `C:\Users\me\AppData\Local\witness`
+	tests := []struct {
+		name        string
+		current     string
+		wantChanged bool
+		wantValue   string
+	}{
+		{"empty PATH", "", true, dir},
+		{"append to existing", `C:\Windows`, true, `C:\Windows;` + dir},
+		{"already present (exact)", `C:\Windows;` + dir, false, `C:\Windows;` + dir},
+		{"already present (case-insensitive)", `C:\Windows;` + `c:\users\me\appdata\local\witness`, false, `C:\Windows;` + `c:\users\me\appdata\local\witness`},
+		{"trailing semicolon preserved", `C:\Windows;`, true, `C:\Windows;` + dir},
+		{"preserves %VAR% tokens verbatim", `%SystemRoot%\system32;%SystemRoot%`, true, `%SystemRoot%\system32;%SystemRoot%;` + dir},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed := appendToPathValue(tt.current, dir)
+			if changed != tt.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
+			}
+			if got != tt.wantValue {
+				t.Errorf("value =\n %q\nwant\n %q", got, tt.wantValue)
+			}
+			// The original value must always be a prefix (we only ever append),
+			// so no existing entry — %VAR% or otherwise — is ever rewritten.
+			if tt.current != "" && !strings.HasPrefix(got, strings.TrimSuffix(tt.current, ";")) {
+				t.Errorf("existing PATH not preserved as prefix: %q", got)
+			}
+		})
+	}
+}
+
 func TestIsWitnessBinaryPath(t *testing.T) {
 	yes := []string{
 		`C:\Users\me\AppData\Local\witness\witness.exe`,

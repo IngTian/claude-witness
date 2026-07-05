@@ -150,6 +150,29 @@ func isWitnessBinaryPath(cmd string) bool {
 	return base == "witness" || strings.HasPrefix(base, "witness-")
 }
 
+// appendToPathValue returns the PATH-style, ';'-separated string with dir added,
+// and whether a change was needed. Idempotent: a case-insensitive match of dir
+// among existing entries (Windows paths are case-insensitive) means no change.
+// Pure string logic, split out from the Windows registry code so it is unit-
+// testable on any OS. The existing value is preserved VERBATIM (including any
+// %VAR% tokens) — the caller writes it back as REG_EXPAND_SZ, which is why we
+// must never flatten it (the setx bug).
+func appendToPathValue(current, dir string) (string, bool) {
+	for _, e := range strings.Split(current, ";") {
+		if strings.EqualFold(strings.TrimSpace(e), dir) {
+			return current, false // already present
+		}
+	}
+	if current == "" {
+		return dir, true
+	}
+	// Preserve a trailing ';' shape rather than doubling it.
+	if strings.HasSuffix(current, ";") {
+		return current + dir, true
+	}
+	return current + ";" + dir, true
+}
+
 // mergeWitnessHooks adds the witness hooks to a settings.json document, replacing
 // any existing witness entries (idempotent, across BOTH invocation forms) and
 // preserving all other hooks and settings verbatim.
