@@ -38,15 +38,39 @@ func newUninstallCmd() *cobra.Command {
 }
 
 // hookCmd / hookEntry mirror the settings.json hooks schema for the entries we own.
+// Args is the Claude Code exec form: when present, CC spawns Command directly with
+// these args and NO shell (used on Windows, where the bash shim can't run). When
+// Args is empty, Command is a shell-form string (Unix, via the witness.sh shim).
 type hookCmd struct {
-	Type    string `json:"type"`
-	Command string `json:"command"`
-	Async   bool   `json:"async,omitempty"`
+	Type    string   `json:"type"`
+	Command string   `json:"command"`
+	Args    []string `json:"args,omitempty"`
+	Async   bool     `json:"async,omitempty"`
 }
 type hookEntry struct {
 	Matcher string    `json:"matcher,omitempty"`
 	Hooks   []hookCmd `json:"hooks"`
 }
+
+// hookInvocation is how the installed hooks call witness — the one thing that
+// differs by platform. Unix uses shell form through the witness.sh shim; Windows
+// uses exec form pointing at the installed witness.exe (no shell). The merge/
+// detect/remove logic is otherwise identical, so it stays platform-independent
+// and fully unit-testable on any OS; only resolveClaudeInstall (GOOS-split) picks
+// which invocation to build.
+type hookInvocation struct {
+	execForm bool   // true => spawn target directly with args (Windows)
+	target   string // shell form: the shim path; exec form: the witness.exe path
+}
+
+func shellInvocation(shim string) hookInvocation {
+	return hookInvocation{execForm: false, target: shim}
+}
+func execInvocation(exe string) hookInvocation { return hookInvocation{execForm: true, target: exe} }
+
+// mcpTarget is the executable settings.json / `claude mcp add` should invoke for
+// the MCP server: the shim on Unix, the installed exe on Windows.
+func (inv hookInvocation) mcpTarget() string { return inv.target }
 
 // shellQuote single-quotes a path for safe use in a shell-executed hook command,
 // POSIX-escaping any embedded single quote (close the quote, backslash-escape the
@@ -60,26 +84,40 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// witnessHookSpecs is the canonical hook wiring, pointing at the given shim. Kept
-// in lockstep with hooks/hooks.json (the plugin-install path uses that file).
-func witnessHookSpecs(shim string) []struct {
+// witnessHookSpecs is the canonical hook wiring for the given invocation. On Unix
+// (shell form) it renders `'<shim>' <token>` command strings, kept in lockstep
+// with hooks/hooks.json (the plugin-install path uses that file). On Windows
+// (exec form) it renders {command: <exe>, args: [<token>]} so CC spawns the
+// binary directly with no shell.
+func witnessHookSpecs(inv hookInvocation) []struct {
 	Event string
 	Entry hookEntry
 } {
-	q := shellQuote(shim)
+	// hook builds one command for a subcommand token, in the right form.
+	hook := func(token string, async bool) hookCmd {
+		if inv.execForm {
+			return hookCmd{Type: "command", Command: inv.target, Args: []string{token}, Async: async}
+		}
+		return hookCmd{Type: "command", Command: shellQuote(inv.target) + " " + token, Async: async}
+	}
 	return []struct {
 		Event string
 		Entry hookEntry
 	}{
-		{"SessionStart", hookEntry{Matcher: "startup|clear|compact|resume", Hooks: []hookCmd{{Type: "command", Command: q + " session-start"}}}},
-		{"UserPromptSubmit", hookEntry{Hooks: []hookCmd{{Type: "command", Command: q + " capture", Async: true}}}},
-		{"Stop", hookEntry{Hooks: []hookCmd{{Type: "command", Command: q + " capture", Async: true}}}},
-		{"SessionEnd", hookEntry{Hooks: []hookCmd{{Type: "command", Command: q + " session-end", Async: true}}}},
+		{"SessionStart", hookEntry{Matcher: "startup|clear|compact|resume", Hooks: []hookCmd{hook("session-start", false)}}},
+		{"UserPromptSubmit", hookEntry{Hooks: []hookCmd{hook("capture", true)}}},
+		{"Stop", hookEntry{Hooks: []hookCmd{hook("capture", true)}}},
+		{"SessionEnd", hookEntry{Hooks: []hookCmd{hook("session-end", true)}}},
 	}
 }
 
-// isWitnessEntry reports whether a parsed hook entry is one of ours (any command
-// references witness.sh) — so re-install/uninstall can find and replace them.
+// isWitnessEntry reports whether a parsed hook entry is one of ours — so
+// re-install/uninstall can find and replace them idempotently. It must recognize
+// BOTH invocation forms, else a re-install on the other platform (or after a
+// shell->exec migration) would fail to dedupe and orphan duplicate hooks:
+//   - shell form (Unix): command contains the shim basename "witness.sh".
+//   - exec form (Windows): command basename is the witness binary (witness/
+//     witness.exe or a per-arch witness-<os>-<arch>[.exe]) and args are present.
 func isWitnessEntry(e any) bool {
 	m, ok := e.(map[string]any)
 	if !ok {
@@ -88,17 +126,34 @@ func isWitnessEntry(e any) bool {
 	hs, _ := m["hooks"].([]any)
 	for _, h := range hs {
 		hm, _ := h.(map[string]any)
-		if c, _ := hm["command"].(string); strings.Contains(c, "witness.sh") {
-			return true
+		c, _ := hm["command"].(string)
+		if strings.Contains(c, "witness.sh") {
+			return true // shell-form shim
+		}
+		if _, hasArgs := hm["args"]; hasArgs && isWitnessBinaryPath(c) {
+			return true // exec-form binary
 		}
 	}
 	return false
 }
 
+// isWitnessBinaryPath reports whether an exec-form command path points at the
+// witness binary, by basename so it matches whether installed as witness.exe or
+// run from a per-arch build (witness-windows-amd64.exe). Uses both path
+// separators because a Windows path may be inspected on any OS (and vice versa).
+func isWitnessBinaryPath(cmd string) bool {
+	base := cmd
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.ToLower(strings.TrimSuffix(base, ".exe"))
+	return base == "witness" || strings.HasPrefix(base, "witness-")
+}
+
 // mergeWitnessHooks adds the witness hooks to a settings.json document, replacing
-// any existing witness entries (idempotent) and preserving all other hooks and
-// settings verbatim.
-func mergeWitnessHooks(data []byte, shim string) ([]byte, error) {
+// any existing witness entries (idempotent, across BOTH invocation forms) and
+// preserving all other hooks and settings verbatim.
+func mergeWitnessHooks(data []byte, inv hookInvocation) ([]byte, error) {
 	root := map[string]any{}
 	if len(strings.TrimSpace(string(data))) > 0 {
 		if err := json.Unmarshal(data, &root); err != nil {
@@ -109,7 +164,7 @@ func mergeWitnessHooks(data []byte, shim string) ([]byte, error) {
 	if hooks == nil {
 		hooks = map[string]any{}
 	}
-	for _, spec := range witnessHookSpecs(shim) {
+	for _, spec := range witnessHookSpecs(inv) {
 		existing, _ := hooks[spec.Event].([]any)
 		kept := []any{}
 		for _, e := range existing {
@@ -244,9 +299,13 @@ func installTarget(args []string) string {
 }
 
 // cmdInstallClaude wires the witness hooks into the user's Claude settings.json
-// and registers the MCP server, both idempotently.
+// and registers the MCP server, both idempotently. The only platform-specific
+// step is resolveClaudeInstall (GOOS-split): Unix returns a shell-form invocation
+// through the in-repo witness.sh shim; Windows copies the binary + assets to a
+// stable install dir and returns an exec-form invocation pointing at it. Every-
+// thing below is platform-independent.
 func cmdInstallClaude() error {
-	shim, err := repoShim()
+	inv, err := resolveClaudeInstall()
 	if err != nil {
 		return err
 	}
@@ -258,7 +317,7 @@ func cmdInstallClaude() error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	merged, err := mergeWitnessHooks(data, shim)
+	merged, err := mergeWitnessHooks(data, inv)
 	if err != nil {
 		return err
 	}
@@ -269,7 +328,7 @@ func cmdInstallClaude() error {
 
 	// Register the MCP server (idempotent: skip if already present).
 	if out, _ := exec.Command("claude", "mcp", "list").CombinedOutput(); !strings.Contains(string(out), "witness") {
-		if err := exec.Command("claude", "mcp", "add", "-s", "user", "witness", shim, "mcp").Run(); err != nil {
+		if err := exec.Command("claude", "mcp", "add", "-s", "user", "witness", inv.mcpTarget(), "mcp").Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "witness: could not register MCP server (is `claude` on PATH?): %v\n", err)
 		} else {
 			fmt.Println("MCP server 'witness' registered")
