@@ -196,6 +196,25 @@ is required: install always binds the matching distillation runtime into
 `make uninstall-opencode`, `make clean`). To remove it: `make uninstall` or
 `make uninstall-opencode` (strips integration wiring; your data is untouched).
 
+### Windows
+
+Windows uses a self-contained zip instead of the shell installer (there is no
+guaranteed shell to run the hook shim). Download `witness-windows-amd64.zip`
+(Intel/AMD) or `witness-windows-arm64.zip` from the releases page — each unpacks
+to a `witness\` folder holding `witness.exe` and the embedding model. Then, from
+inside that folder in PowerShell:
+
+```powershell
+.\witness.exe install claude
+```
+
+This copies the bundle into `%LOCALAPPDATA%\witness`, adds it to your user PATH,
+and wires Claude Code with **exec-form hooks** pointing at `witness.exe` (no shell,
+no Git Bash needed). The zip carries the prompt templates and the ~448MB model
+alongside the exe; the binary resolves both relative to itself. Uninstall strips
+the hooks + MCP (`witness.exe uninstall claude`); the copied files and PATH entry
+are left in place for now.
+
 ### OpenCode support
 
 OpenCode support has two pieces:

@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/IngTian/claude-witness/internal/bundle"
 )
 
 // Lens carries the two prompts the distiller needs plus identity.
@@ -21,15 +23,12 @@ type Lens struct {
 	Review     string // prompt for the reviewer -> facets
 }
 
-// promptsDir resolves the bundled prompts directory.
+// promptsDir resolves the bundled prompts directory. Resolution (bundle.Dir):
+// WITNESS_PROMPTS, else $CLAUDE_PLUGIN_ROOT/prompts, else exe-relative (so a
+// Windows exec-form hook, with no shell to export CLAUDE_PLUGIN_ROOT, still finds
+// the prompts beside the installed binary), else the cwd-relative dev fallback.
 func promptsDir() string {
-	if d := os.Getenv("WITNESS_PROMPTS"); d != "" {
-		return d
-	}
-	if root := os.Getenv("CLAUDE_PLUGIN_ROOT"); root != "" {
-		return filepath.Join(root, "prompts")
-	}
-	return "prompts"
+	return bundle.Dir("prompts", "WITNESS_PROMPTS")
 }
 
 // LoadDefault loads the always-on global lens from prompts/default/.

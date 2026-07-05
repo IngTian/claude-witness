@@ -20,40 +20,54 @@ import (
 func TestHookCommandTokensAreRegisteredCommands(t *testing.T) {
 	root := newRootCmd()
 
-	// Tokens install actually emits into settings.json.
-	shim := "/repo/hooks/witness.sh"
-	emitted := map[string]bool{}
-	for _, spec := range witnessHookSpecs(shim) {
-		for _, h := range spec.Entry.Hooks {
-			emitted[trailingToken(t, h.Command)] = true
-		}
-	}
-	// Sanity: install must emit the three hook entry points we expect. If the
-	// hook wiring changes, update this list deliberately (that's the point).
-	for _, want := range []string{"session-start", "capture", "session-end"} {
-		if !emitted[want] {
-			t.Errorf("witnessHookSpecs no longer emits %q — hook wiring changed", want)
-		}
-	}
-
-	// Every emitted token, plus the tokens the binary spawns for itself (`worker`
-	// via spawnDetached, `mcp` via MCP registration), must resolve to a command.
-	tokens := map[string]bool{"worker": true, "mcp": true}
-	for tok := range emitted {
-		tokens[tok] = true
-	}
-	for tok := range tokens {
-		assertRegistered(t, root, tok)
+	// Run the contract for BOTH invocation forms. Shell form (Unix) carries the
+	// token as the trailing word of the command string; exec form (Windows)
+	// carries it in Args. Either way the token must be a real cobra command.
+	for _, tc := range []struct {
+		name string
+		inv  hookInvocation
+	}{
+		{"shell form (unix shim)", shellInvocation("/repo/hooks/witness.sh")},
+		{"exec form (windows exe)", execInvocation(`C:\witness\witness.exe`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			emitted := map[string]bool{}
+			for _, spec := range witnessHookSpecs(tc.inv) {
+				for _, h := range spec.Entry.Hooks {
+					emitted[hookToken(t, h)] = true
+				}
+			}
+			// Sanity: install must emit the three hook entry points we expect. If the
+			// hook wiring changes, update this list deliberately (that's the point).
+			for _, want := range []string{"session-start", "capture", "session-end"} {
+				if !emitted[want] {
+					t.Errorf("witnessHookSpecs no longer emits %q — hook wiring changed", want)
+				}
+			}
+			// Every emitted token, plus the tokens the binary spawns for itself
+			// (`worker` via spawnDetached, `mcp` via MCP registration), must resolve.
+			tokens := map[string]bool{"worker": true, "mcp": true}
+			for tok := range emitted {
+				tokens[tok] = true
+			}
+			for tok := range tokens {
+				assertRegistered(t, root, tok)
+			}
+		})
 	}
 }
 
-// trailingToken extracts the subcommand token from an emitted hook command of the
-// form `'<shim>' <token>` (the shim is single-quoted by shellQuote).
-func trailingToken(t *testing.T, command string) string {
+// hookToken extracts the subcommand token from an emitted hook, handling both
+// forms: exec form (Windows) puts it in Args; shell form (Unix) puts it as the
+// trailing word of the `'<shim>' <token>` command string.
+func hookToken(t *testing.T, h hookCmd) string {
 	t.Helper()
-	fields := strings.Fields(command)
+	if len(h.Args) > 0 {
+		return h.Args[len(h.Args)-1]
+	}
+	fields := strings.Fields(h.Command)
 	if len(fields) < 2 {
-		t.Fatalf("hook command %q has no subcommand token", command)
+		t.Fatalf("hook command %q has no subcommand token", h.Command)
 	}
 	return fields[len(fields)-1]
 }

@@ -42,7 +42,7 @@ func countWitness(cmds []string) int {
 }
 
 func TestMergeAddsAllFourWitnessHooks(t *testing.T) {
-	out, err := mergeWitnessHooks([]byte(`{}`), "/repo/hooks/witness.sh")
+	out, err := mergeWitnessHooks([]byte(`{}`), shellInvocation("/repo/hooks/witness.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,8 +54,8 @@ func TestMergeAddsAllFourWitnessHooks(t *testing.T) {
 }
 
 func TestMergeIsIdempotent(t *testing.T) {
-	out, _ := mergeWitnessHooks([]byte(`{}`), "/repo/hooks/witness.sh")
-	out2, _ := mergeWitnessHooks(out, "/repo/hooks/witness.sh") // re-install
+	out, _ := mergeWitnessHooks([]byte(`{}`), shellInvocation("/repo/hooks/witness.sh"))
+	out2, _ := mergeWitnessHooks(out, shellInvocation("/repo/hooks/witness.sh")) // re-install
 	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
 		if got := countWitness(eventCommands(t, out2, ev)); got != 1 {
 			t.Errorf("%s: re-install should not duplicate, got %d", ev, got)
@@ -65,7 +65,7 @@ func TestMergeIsIdempotent(t *testing.T) {
 
 func TestMergePreservesForeignHooksAndSettings(t *testing.T) {
 	in := `{"model":"opus","hooks":{"Stop":[{"hooks":[{"type":"command","command":"prettier --write"}]}]}}`
-	out, err := mergeWitnessHooks([]byte(in), "/repo/hooks/witness.sh")
+	out, err := mergeWitnessHooks([]byte(in), shellInvocation("/repo/hooks/witness.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,12 +89,245 @@ func TestMergePreservesForeignHooksAndSettings(t *testing.T) {
 	}
 }
 
+// --- Windows exec-form hooks (guarded on any OS since the merge logic is
+// platform-independent; only resolveClaudeInstall is GOOS-split) --------------
+
+// execCommands returns (command, args, isWitness) for each hook in an event, so
+// exec-form assertions can inspect both the exe path and the arg token.
+func execCommands(t *testing.T, data []byte, event string) []struct {
+	Command string
+	Args    []string
+} {
+	t.Helper()
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, data)
+	}
+	hooks, _ := root["hooks"].(map[string]any)
+	entries, _ := hooks[event].([]any)
+	var out []struct {
+		Command string
+		Args    []string
+	}
+	for _, e := range entries {
+		m, _ := e.(map[string]any)
+		hs, _ := m["hooks"].([]any)
+		for _, h := range hs {
+			hm, _ := h.(map[string]any)
+			cmd, _ := hm["command"].(string)
+			var args []string
+			if raw, ok := hm["args"].([]any); ok {
+				for _, a := range raw {
+					if s, ok := a.(string); ok {
+						args = append(args, s)
+					}
+				}
+			}
+			out = append(out, struct {
+				Command string
+				Args    []string
+			}{cmd, args})
+		}
+	}
+	return out
+}
+
+// TestMergeExecFormShape verifies the Windows exec form: command is the bare exe
+// path (NOT shell-quoted), the subcommand rides in args, and no shell is implied.
+func TestMergeExecFormShape(t *testing.T) {
+	exe := `C:\Users\me\AppData\Local\witness\witness.exe`
+	out, err := mergeWitnessHooks([]byte(`{}`), execInvocation(exe))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"SessionStart": "session-start", "UserPromptSubmit": "capture",
+		"Stop": "capture", "SessionEnd": "session-end",
+	}
+	for ev, token := range want {
+		cmds := execCommands(t, out, ev)
+		if len(cmds) != 1 {
+			t.Fatalf("%s: want 1 hook, got %d", ev, len(cmds))
+		}
+		if cmds[0].Command != exe {
+			t.Errorf("%s: command = %q, want bare exe %q (no quoting)", ev, cmds[0].Command, exe)
+		}
+		if len(cmds[0].Args) != 1 || cmds[0].Args[0] != token {
+			t.Errorf("%s: args = %v, want [%q]", ev, cmds[0].Args, token)
+		}
+	}
+}
+
+// TestMergeExecFormIsIdempotent guards the research-flagged risk: exec-form
+// entries must be recognized as ours on re-install, else duplicates accumulate.
+func TestMergeExecFormIsIdempotent(t *testing.T) {
+	exe := `C:\witness\witness.exe`
+	out, _ := mergeWitnessHooks([]byte(`{}`), execInvocation(exe))
+	out2, _ := mergeWitnessHooks(out, execInvocation(exe))
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
+		if got := len(execCommands(t, out2, ev)); got != 1 {
+			t.Errorf("%s: exec-form re-install duplicated, got %d hooks", ev, got)
+		}
+	}
+}
+
+// TestMergeMigratesShellToExecWithoutOrphans is the cross-form dedup contract:
+// installing exec form over a prior shell-form install (or vice versa) must
+// REPLACE the old witness hook, not leave both. Without isWitnessEntry
+// recognizing both forms, a platform switch would orphan the stale entry.
+func TestMergeMigratesShellToExecWithoutOrphans(t *testing.T) {
+	// Start with a shell-form install.
+	shell, _ := mergeWitnessHooks([]byte(`{}`), shellInvocation("/repo/hooks/witness.sh"))
+	// Now install exec form over it.
+	exe := `C:\witness\witness.exe`
+	migrated, _ := mergeWitnessHooks(shell, execInvocation(exe))
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
+		cmds := execCommands(t, migrated, ev)
+		if len(cmds) != 1 {
+			t.Fatalf("%s: want exactly 1 hook after migration, got %d: %+v", ev, len(cmds), cmds)
+		}
+		// It must be the exec-form one (args present, exe command), not the shim.
+		if len(cmds[0].Args) == 0 || cmds[0].Command != exe {
+			t.Errorf("%s: migrated hook is not the exec form: %+v", ev, cmds[0])
+		}
+		if strings.Contains(cmds[0].Command, "witness.sh") {
+			t.Errorf("%s: stale shell-form shim was orphaned: %q", ev, cmds[0].Command)
+		}
+	}
+	// And the reverse: shell over exec must also dedupe to one.
+	back, _ := mergeWitnessHooks(migrated, shellInvocation("/repo/hooks/witness.sh"))
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"} {
+		if got := len(execCommands(t, back, ev)); got != 1 {
+			t.Errorf("%s: exec->shell migration left %d hooks, want 1", ev, got)
+		}
+	}
+}
+
+// TestRemoveWitnessHooksExecForm proves uninstall strips exec-form entries too.
+func TestRemoveWitnessHooksExecForm(t *testing.T) {
+	in := `{"hooks":{"Stop":[` +
+		`{"hooks":[{"type":"command","command":"prettier"}]},` +
+		`{"hooks":[{"type":"command","command":"C:\\witness\\witness.exe","args":["capture"]}]}` +
+		`]}}`
+	out, err := removeWitnessHooks([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmds := execCommands(t, out, "Stop")
+	if len(cmds) != 1 || cmds[0].Command != "prettier" {
+		t.Errorf("want only the foreign prettier hook left, got %+v", cmds)
+	}
+}
+
+// TestAppendToPathValue locks the PATH-edit contract used by the Windows
+// registry path: idempotent (case-insensitive, Windows paths), preserves the
+// existing value VERBATIM including %VAR% tokens (the caller writes REG_EXPAND_SZ,
+// so we must never flatten — the setx bug), and handles empty / trailing-';'.
+func TestAppendToPathValue(t *testing.T) {
+	dir := `C:\Users\me\AppData\Local\witness`
+	tests := []struct {
+		name        string
+		current     string
+		wantChanged bool
+		wantValue   string
+	}{
+		{"empty PATH", "", true, dir},
+		{"append to existing", `C:\Windows`, true, `C:\Windows;` + dir},
+		{"already present (exact)", `C:\Windows;` + dir, false, `C:\Windows;` + dir},
+		{"already present (case-insensitive)", `C:\Windows;` + `c:\users\me\appdata\local\witness`, false, `C:\Windows;` + `c:\users\me\appdata\local\witness`},
+		{"trailing semicolon preserved", `C:\Windows;`, true, `C:\Windows;` + dir},
+		{"preserves %VAR% tokens verbatim", `%SystemRoot%\system32;%SystemRoot%`, true, `%SystemRoot%\system32;%SystemRoot%;` + dir},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed := appendToPathValue(tt.current, dir)
+			if changed != tt.wantChanged {
+				t.Errorf("changed = %v, want %v", changed, tt.wantChanged)
+			}
+			if got != tt.wantValue {
+				t.Errorf("value =\n %q\nwant\n %q", got, tt.wantValue)
+			}
+			// The original value must always be a prefix (we only ever append),
+			// so no existing entry — %VAR% or otherwise — is ever rewritten.
+			if tt.current != "" && !strings.HasPrefix(got, strings.TrimSuffix(tt.current, ";")) {
+				t.Errorf("existing PATH not preserved as prefix: %q", got)
+			}
+		})
+	}
+}
+
+func TestIsWitnessBinary(t *testing.T) {
+	yes := []string{
+		`C:\Users\me\AppData\Local\witness\witness.exe`,
+		"/home/me/.local/share/witness/witness",
+		"witness.exe",
+		"witness",
+		`C:\Users\me\WITNESS.EXE`, // case-insensitive (Windows)
+	}
+	no := []string{
+		"prettier", "/usr/bin/node", `C:\tools\notwitness.exe`,
+		"witnessing.exe",
+		// A DIFFERENT tool named witness-<x>: the installer never writes these
+		// (it always copies to a bare witness.exe), so matching them would only
+		// risk clobbering a foreign hook. Must NOT match.
+		"bin/witness-windows-amd64.exe",
+		"/usr/local/bin/witness-cli",
+	}
+	for _, p := range yes {
+		if !isWitnessBinary(p) {
+			t.Errorf("isWitnessBinary(%q) = false, want true", p)
+		}
+	}
+	for _, p := range no {
+		if isWitnessBinary(p) {
+			t.Errorf("isWitnessBinary(%q) = true, want false", p)
+		}
+	}
+}
+
+// TestExecFormDoesNotStripForeignWitnessHook is the regression guard for the
+// review-confirmed bug: a user's UNRELATED hook that invokes a different tool
+// named "witness" (e.g. the testifysec supply-chain CLI) with args must be
+// preserved verbatim by both merge and remove — not misclassified as ours.
+// This runs on every platform (isWitnessEntry has no build tags), so it also
+// protects the "Unix byte-identical" claim.
+func TestExecFormDoesNotStripForeignWitnessHook(t *testing.T) {
+	// A foreign hook: bare "witness" binary, but its arg is NOT one of our tokens.
+	foreign := `{"model":"opus","hooks":{"Stop":[{"hooks":[` +
+		`{"type":"command","command":"/usr/local/bin/witness","args":["run","--step","build"]}` +
+		`]}]}}`
+
+	// remove must leave it untouched.
+	out, err := removeWitnessHooks([]byte(foreign))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmds := execCommands(t, out, "Stop"); len(cmds) != 1 || cmds[0].Command != "/usr/local/bin/witness" {
+		t.Errorf("foreign witness hook was stripped by removeWitnessHooks: %+v", cmds)
+	}
+
+	// merge (shell form, Unix) must also preserve it while adding ours.
+	merged, err := mergeWitnessHooks([]byte(foreign), shellInvocation("/repo/hooks/witness.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundForeign := false
+	for _, c := range execCommands(t, merged, "Stop") {
+		if c.Command == "/usr/local/bin/witness" {
+			foundForeign = true
+		}
+	}
+	if !foundForeign {
+		t.Errorf("foreign witness hook clobbered by mergeWitnessHooks; Stop = %+v", execCommands(t, merged, "Stop"))
+	}
+}
+
 // The shim path is written into a shell-executed command, so it must be quoted —
 // a repo cloned into a path with a space (common on macOS) would otherwise
 // word-split and every hook would silently fail.
 func TestHookCommandsQuotePathWithSpaces(t *testing.T) {
 	shim := "/Users/me/My Projects/claude-witness/hooks/witness.sh"
-	out, err := mergeWitnessHooks([]byte(`{}`), shim)
+	out, err := mergeWitnessHooks([]byte(`{}`), shellInvocation(shim))
 	if err != nil {
 		t.Fatal(err)
 	}
