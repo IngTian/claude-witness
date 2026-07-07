@@ -43,18 +43,22 @@ type Embedder struct {
 	mu      sync.Mutex
 }
 
-// assetsDir resolves where the bundled model lives. modelDir must contain
+// AssetsDir resolves where the bundled model lives. The dir must contain
 // model.onnx + tokenizer.json. Resolution (bundle.Dir): WITNESS_ASSETS, else
 // $CLAUDE_PLUGIN_ROOT/assets/e5-small, else exe-relative (so a Windows exec-form
 // hook, which has no shell to export CLAUDE_PLUGIN_ROOT, still finds the model
 // beside the installed binary), else the cwd-relative dev fallback.
-func assetsDir() string {
+//
+// Exported so the model-fetch path (internal/model) writes into the exact same
+// directory embed reads from — a fetched model is then indistinguishable from a
+// bundled one.
+func AssetsDir() string {
 	return bundle.Dir(filepath.Join("assets", "e5-small"), "WITNESS_ASSETS")
 }
 
 // New loads the embedder from the assets directory.
 func New() (*Embedder, error) {
-	dir := assetsDir()
+	dir := AssetsDir()
 	modelPath := filepath.Join(dir, "model.onnx")
 	tokPath := filepath.Join(dir, "tokenizer.json")
 

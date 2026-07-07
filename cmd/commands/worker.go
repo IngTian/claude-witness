@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/model"
 	opencodeimport "github.com/IngTian/witness/internal/runtimes/opencode"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -68,11 +70,21 @@ func runWorker() (bool, error) {
 
 	// Embedder is heavy (~448MB); load it lazily and once, only if a session
 	// actually needs mining. Review doesn't need it.
+	//
+	// Lazy-on-first-use is also the ONLY path that acquires the model for an npm
+	// OpenCode install: that user never runs `witness install`, but their plugin
+	// kicks this worker via `witness import`, so model.Ensure here is what makes
+	// distillation self-heal from a model-less install. Bundled/from-source runs
+	// no-op (Present() short-circuits). A fetch failure surfaces via embErr below.
 	var emb *embed.Embedder
 	var embErr error
 	getEmb := func() (*embed.Embedder, error) {
 		if emb == nil && embErr == nil {
-			emb, embErr = embed.New()
+			if err := model.Ensure(embed.AssetsDir(), func(f string, a ...any) { slog.Info(fmt.Sprintf(f, a...)) }); err != nil {
+				embErr = err
+			} else {
+				emb, embErr = embed.New()
+			}
 		}
 		return emb, embErr
 	}

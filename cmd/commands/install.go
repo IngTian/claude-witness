@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/model"
 	opencodeplugin "github.com/IngTian/witness/internal/runtimes/opencode/plugin"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -325,6 +327,16 @@ func repoShim() (string, error) {
 // (enforced by cobra ExactArgs) so install always binds the matching distillation
 // runtime into config.toml.
 func cmdInstall(args []string) error {
+	// Fetch the embedding model up front (the explicit-command acquisition path,
+	// à la `npx playwright install`). Non-fatal: capture works without the model
+	// and the worker re-attempts the lazy fetch before its first mine, so a
+	// download failure here must not block wiring hooks/plugin. No-op when the
+	// model is already bundled (from-source / Windows-zip installs).
+	if err := model.Ensure(embed.AssetsDir(), func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }); err != nil {
+		fmt.Fprintf(os.Stderr, "witness: embedding model not fetched (%v)\n", err)
+		fmt.Fprintln(os.Stderr, "witness: capture still works; distillation will retry the download on its first run.")
+	}
+
 	target := installTarget(args)
 	switch target {
 	case "claude":

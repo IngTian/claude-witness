@@ -7,6 +7,7 @@ import (
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/model"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -161,6 +162,15 @@ func cmdDoctor(asJSON bool) error {
 	fmt.Println("  " + bold("Embedder"))
 	if embErr != nil {
 		fmt.Printf("    %s %s %s\n", label("status"), badGlyph(), red(embedderStatus))
+		// The common cause is a model-less install channel (npm plugin). Name the
+		// remedy rather than leaving the user with a bare "UNAVAILABLE": the worker
+		// fetches lazily on its next run, or `witness install` fetches now.
+		if !model.Present(embed.AssetsDir()) {
+			fmt.Printf("    %s %s\n", dim("↳ fix:"),
+				dim("run `witness install <claude|opencode>` to fetch the model now, or let the worker fetch it on its next run"))
+			fmt.Printf("    %s %s\n", dim("      "),
+				dim(fmt.Sprintf("(offline? set WITNESS_ASSETS to a model dir; %s skips the download)", model.SkipEnv)))
+		}
 	} else {
 		status := embedderStatus
 		if embedDim > 0 {

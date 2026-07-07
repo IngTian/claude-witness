@@ -11,7 +11,12 @@ set -euo pipefail
 
 DEST="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/assets/e5-small}"
 REPO="intfloat/multilingual-e5-small"
-BASE="https://huggingface.co/${REPO}/resolve/main"
+# Pin the exact revision so the bytes match internal/model's pinned SHA-256s — a
+# floating `main` would drift the day upstream republishes the model, and the Go
+# fetch path (which hash-checks) would then reject a make-fetched model. Keep this
+# commit in lockstep with internal/model.pinnedRevision.
+REV="614241f622f53c4eeff9890bdc4f31cfecc418b3"
+BASE="https://huggingface.co/${REPO}/resolve/${REV}"
 
 mkdir -p "$DEST"
 echo "Fetching e5-small into $DEST ..."
