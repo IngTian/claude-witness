@@ -46,3 +46,8 @@ assets/e5-small/*.onnx_data
 *.exe
 # Release archives (produced by `make package-windows`, attached to releases)
 *.zip
+
+# Generated npm publish payload. Produced by `make npm-opencode-package`.
+/npm/opencode/dist/
+/npm/opencode/prompts/
+/npm/opencode/assets/

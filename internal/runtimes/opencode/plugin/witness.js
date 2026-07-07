@@ -1,3 +1,5 @@
+const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || "witness"
+
 function eventType(event) {
   return String(event?.type || "")
 }
@@ -5,7 +7,7 @@ function eventType(event) {
 function spawnWitness(args, payload) {
   if (process.env.WITNESS_WORKER === "1") return
   try {
-    const proc = Bun.spawn([SHIM, ...args], {
+    const proc = Bun.spawn([WITNESS_BIN, ...args], {
       stdin: payload ? new Blob([JSON.stringify(payload)]) : "ignore",
       stdout: "ignore",
       stderr: "ignore",
@@ -25,7 +27,7 @@ function syncOpenCode() {
   spawnWitness(["import", "--agent", "opencode", "--quiet"])
 }
 
-export const ClaudeWitness = async () => ({
+const plugin = async () => ({
   event: async ({ event }) => {
     if (process.env.WITNESS_WORKER === "1") return
     const type = eventType(event)
@@ -39,3 +41,6 @@ export const ClaudeWitness = async () => ({
     }
   },
 })
+
+export const Witness = plugin
+export const ClaudeWitness = plugin

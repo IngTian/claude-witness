@@ -126,8 +126,8 @@ func (s *Store) EnsureConfigFile() error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	tpl := `# claude-witness configuration — all fields optional, shown with defaults.
-# Docs: https://github.com/IngTian/claude-witness#configuration
+	tpl := `# witness configuration — all fields optional, shown with defaults.
+# Docs: https://github.com/IngTian/witness#configuration
 
 # Distillation runtime: "claude" (default, uses ` + "`claude -p`" + `) or "opencode"
 # (uses ` + "`opencode run`" + `). Bound automatically by ` + "`witness install`" + `.

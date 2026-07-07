@@ -1,0 +1,35 @@
+{
+  "name": "@witness-ai/opencode",
+  "version": "0.0.1",
+  "description": "OpenCode plugin for witness session capture and background distillation.",
+  "type": "module",
+  "main": "./witness.js",
+  "exports": "./witness.js",
+  "bin": {
+    "witness": "bin/witness.js"
+  },
+  "scripts": {
+    "prepublishOnly": "../../scripts/stage-npm-opencode.sh --build"
+  },
+  "files": [
+    "witness.js",
+    "bin/",
+    "dist/",
+    "prompts/",
+    "README.md"
+  ],
+  "keywords": [
+    "opencode",
+    "plugin",
+    "witness"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IngTian/witness.git",
+    "directory": "npm/opencode"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
