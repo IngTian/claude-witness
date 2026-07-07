@@ -1,4 +1,18 @@
-const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || "witness"
+import { existsSync } from "node:fs"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+
+function bundledWitnessBin() {
+  const os = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform]
+  const arch = { x64: "amd64", arm64: "arm64" }[process.arch]
+  if (!os || !arch) return ""
+  const name = `witness-${os}-${arch}${os === "windows" ? ".exe" : ""}`
+  const packageRoot = path.dirname(fileURLToPath(import.meta.url))
+  const bin = path.join(packageRoot, "dist", name)
+  return existsSync(bin) ? bin : ""
+}
+
+const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || bundledWitnessBin() || "witness"
 
 function eventType(event) {
   return String(event?.type || "")
@@ -27,7 +41,7 @@ function syncOpenCode() {
   spawnWitness(["import", "--agent", "opencode", "--quiet"])
 }
 
-export const Witness = async () => ({
+const plugin = async () => ({
   event: async ({ event }) => {
     if (process.env.WITNESS_WORKER === "1") return
     const type = eventType(event)
@@ -41,3 +55,6 @@ export const Witness = async () => ({
     }
   },
 })
+
+export const Witness = plugin
+export const ClaudeWitness = plugin

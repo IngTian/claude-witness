@@ -228,8 +228,12 @@ OpenCode support has two pieces:
   `get_profile`, `get_facets`, `search_observations`, `record_observation`, and
   `delete_observation`.
 
-If you install the OpenCode plugin from npm, make sure `witness` is on `PATH` (or set `WITNESS_BIN` before
-starting OpenCode), then add the plugin and MCP server to `~/.config/opencode/opencode.json`:
+The npm package ships the OpenCode plugin, a `witness` CLI shim, and prebuilt witness binaries. Install
+it, then add the plugin and MCP server to `~/.config/opencode/opencode.json`:
+
+```sh
+npm install -g @witness-ai/opencode
+```
 
 ```json
 {
@@ -245,11 +249,11 @@ starting OpenCode), then add the plugin and MCP server to `~/.config/opencode/op
 }
 ```
 
-The npm package lives in [`npm/opencode`](npm/opencode):
+The npm package lives in [`npm/opencode`](npm/opencode). Stage prebuilt binaries and bundled assets before publishing:
 
 ```sh
-cd npm/opencode
-npm publish --access public
+make npm-opencode-package
+(cd npm/opencode && npm publish --access public)
 ```
 
 Manual verification path:

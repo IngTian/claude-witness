@@ -4,7 +4,11 @@ OpenCode plugin for witness. It captures OpenCode message events, reconciles Ope
 
 ## Install
 
-Install the `witness` CLI first, then add the npm plugin to your OpenCode config:
+Install the package, then add the plugin to your OpenCode config:
+
+```sh
+npm install -g @witness-ai/opencode
+```
 
 ```json
 {
@@ -13,7 +17,9 @@ Install the `witness` CLI first, then add the npm plugin to your OpenCode config
 }
 ```
 
-The plugin invokes `witness` from `PATH`. If your binary is elsewhere, set `WITNESS_BIN` before starting OpenCode:
+The package includes the `witness` CLI and bundled platform binaries. The plugin uses the bundled binary first, then falls back to `WITNESS_BIN` or `witness` from `PATH`.
+
+If you want to force a different binary, set `WITNESS_BIN` before starting OpenCode:
 
 ```sh
 export WITNESS_BIN=/absolute/path/to/witness

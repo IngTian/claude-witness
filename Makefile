@@ -5,7 +5,7 @@ COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILDTIME  ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS    := -X github.com/IngTian/claude-witness/cmd/commands.version=$(VERSION) -X github.com/IngTian/claude-witness/cmd/commands.commit=$(COMMIT) -X github.com/IngTian/claude-witness/cmd/commands.buildTime=$(BUILDTIME)
 
-.PHONY: build build-all package-windows fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt clean
+.PHONY: build build-all package-windows npm-opencode-package fetch-model install install-opencode uninstall uninstall-opencode doctor test vet fmt clean
 
 ## build: compile the binary for this OS/arch into bin/
 build:
@@ -39,6 +39,11 @@ package-windows: build-all fetch-model
 	  echo "  wrote bin/witness-windows-$$arch.zip"; \
 	done; \
 	rm -rf bin/pkg
+
+## npm-opencode-package: stage prebuilt binaries/assets and verify the npm package
+npm-opencode-package:
+	./scripts/stage-npm-opencode.sh --build
+	cd npm/opencode && npm pack --dry-run
 
 ## fetch-model: download the embedding model (~448MB, once; idempotent)
 fetch-model:

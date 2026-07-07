@@ -5,8 +5,18 @@
   "type": "module",
   "main": "./witness.js",
   "exports": "./witness.js",
+  "bin": {
+    "witness": "./bin/witness.js"
+  },
+  "scripts": {
+    "prepublishOnly": "../../scripts/stage-npm-opencode.sh --build"
+  },
   "files": [
     "witness.js",
+    "bin/",
+    "dist/",
+    "prompts/",
+    "assets/e5-small/",
     "README.md"
   ],
   "keywords": [
