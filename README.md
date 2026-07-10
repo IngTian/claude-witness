@@ -220,8 +220,8 @@ are left in place for now.
 
 OpenCode support has two pieces:
 
-- A plugin captures OpenCode message events into witness L0, reconciles OpenCode's SQLite DB on idle,
-  and asks the laptop-friendly auto-start gate to distill when allowed. From-source installs write a
+- A plugin reconciles OpenCode's SQLite DB on startup and when a session goes idle, then asks the
+  laptop-friendly auto-start gate to distill when allowed. From-source installs write a
   local plugin to `~/.config/opencode/plugins/witness.js`; published installs can use the npm plugin
   `@witness-ai/opencode`.
 - An OpenCode MCP entry named `witness` launches the same MCP server as Claude Code, exposing
@@ -229,25 +229,35 @@ OpenCode support has two pieces:
   `delete_observation`.
 
 The npm package ships the OpenCode plugin, a `witness` CLI shim, prebuilt witness binaries, and prompts.
-Install it, then add the plugin and MCP server to `~/.config/opencode/opencode.json`:
+The config-only path is the default: add the plugin to `~/.config/opencode/opencode.json`, and OpenCode
+installs it automatically with Bun on startup. If `mcp.witness` is absent, the plugin auto-registers it
+for you.
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@witness-ai/opencode"]
+}
+```
+
+Optional: install it globally if you also want a `witness` command on your shell `PATH`:
 
 ```sh
 npm install -g @witness-ai/opencode
 ```
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@witness-ai/opencode"],
-  "mcp": {
-    "witness": {
-      "type": "local",
-      "command": ["witness", "mcp"],
-      "enabled": true
-    }
-  }
-}
+Optional: run it ad hoc without a global install:
+
+```sh
+npm exec --yes --package=@witness-ai/opencode -- witness doctor
 ```
+
+The npm tarball is about 96MB, and the first embedding-model download is about 470MB. The plugin owns
+that download only while OpenCode is running and stops it on shutdown; retries use bounded backoff.
+If you already have your own `mcp.witness` config, the plugin leaves it untouched. The npm wrapper does
+not support `witness install` / `witness uninstall`; those commands are for source-checkout installs.
+Custom model mirrors must provide `WITNESS_MODEL_SHA256` and `WITNESS_TOKENIZER_SHA256` alongside
+`WITNESS_MODEL_BASE_URL`.
 
 The npm package lives in [`npm/opencode`](npm/opencode). Stage prebuilt binaries and prompts before publishing:
 

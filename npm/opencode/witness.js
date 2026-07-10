@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url"
 import { modelDir, modelReady, startModelDownload } from "./bin/model.js"
 
 const PACKAGE_ROOT = path.dirname(fileURLToPath(import.meta.url))
+const DOWNLOAD_RETRY_MAX = 6
+const DOWNLOAD_RETRY_BASE_MS = 1000
+const DOWNLOAD_RETRY_CAP_MS = 30000
 
 function bundledWitnessBin() {
   const os = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform]
@@ -15,10 +18,6 @@ function bundledWitnessBin() {
 }
 
 const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || bundledWitnessBin() || "witness"
-
-function eventType(event) {
-  return String(event?.type || "")
-}
 
 function spawnWitness(args, payload) {
   if (process.env.WITNESS_WORKER === "1") return
@@ -43,31 +42,96 @@ function spawnWitness(args, payload) {
   }
 }
 
-function capture(event) {
-  spawnWitness(["capture", "--agent", "opencode"], event)
+function eventType(event) {
+  return String(event?.type || "")
 }
 
-function syncOpenCode() {
-  spawnWitness(["import", "--agent", "opencode", "--quiet", "--auto"])
+function waitForExit(child) {
+  if (!child) return Promise.resolve()
+  if (typeof child.exited?.then === "function") return child.exited.catch(() => {})
+  if (child.exitCode !== null && child.exitCode !== undefined) return Promise.resolve()
+  return new Promise((resolve) => {
+    child.once?.("exit", () => resolve())
+    child.once?.("error", () => resolve())
+  })
 }
 
 const plugin = async () => {
   let disposed = false
-  // Start at most one plugin-owned model download. It is intentionally tied to
-  // the plugin lifecycle so closing OpenCode stops the network/disk work; npm
-  // install itself never starts a hidden 470MB transfer.
-  const download = startModelDownload(PACKAGE_ROOT, {
-    onExit(code) {
-      // A completed model download may unblock queued raw turns. Reconcile once,
-      // then let the Go-side auto gate decide whether it is allowed to run model
-      // work now (cooldown, session budget, and worker liveness are enforced there).
-      if (!disposed && code === 0 && modelReady(PACKAGE_ROOT)) syncOpenCode()
-    },
-  })
+  let retryTimer = null
+  let download = null
+  const imports = new Set()
+
+  function clearRetry() {
+    if (retryTimer) clearTimeout(retryTimer)
+    retryTimer = null
+  }
+
+  function scheduleRetry(attempt) {
+    if (disposed || process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(PACKAGE_ROOT) || attempt > DOWNLOAD_RETRY_MAX) return
+    clearRetry()
+    const delay = Math.min(DOWNLOAD_RETRY_BASE_MS * (2 ** (attempt - 1)), DOWNLOAD_RETRY_CAP_MS)
+    retryTimer = setTimeout(() => {
+      retryTimer = null
+      ensureDownload(attempt)
+    }, delay)
+    retryTimer.unref?.()
+  }
+
+  function ensureDownload(attempt = 0) {
+    if (disposed || download || process.env.WITNESS_SKIP_MODEL_DOWNLOAD === "1" || modelReady(PACKAGE_ROOT)) return
+    // Retry lock contention and transient download failures, but stop after a
+    // small bounded backoff window so a broken network does not spin forever.
+    const nextAttempt = attempt + 1
+    download = startModelDownload(PACKAGE_ROOT, {
+      onExit(code) {
+        download = null
+        if (disposed) return
+        if (code === 0 && modelReady(PACKAGE_ROOT)) {
+          syncOpenCode()
+          return
+        }
+        scheduleRetry(nextAttempt)
+      },
+    })
+    if (!download && !modelReady(PACKAGE_ROOT)) scheduleRetry(nextAttempt)
+  }
+
+  function syncOpenCode() {
+    const proc = spawnWitness(["import", "--agent", "opencode", "--quiet", "--auto"])
+    if (!proc) return
+    imports.add(proc)
+    waitForExit(proc).finally(() => imports.delete(proc))
+    return proc
+  }
+
+  ensureDownload()
+  syncOpenCode()
   return {
+    config: async (input) => {
+      input.mcp ||= {}
+      if (input.mcp.witness) return
+      input.mcp.witness = {
+        type: "local",
+        command: [WITNESS_BIN, "mcp"],
+        environment: {
+          WITNESS_ASSETS: modelDir(PACKAGE_ROOT),
+          WITNESS_RUNNER: "opencode",
+        },
+        enabled: true,
+      }
+    },
     dispose: async () => {
       disposed = true
+      clearRetry()
+      const activeImports = [...imports]
+      for (const proc of activeImports) {
+        if (!proc.killed && proc.exitCode === null) proc.kill?.()
+      }
+      await Promise.all(activeImports.map((proc) => waitForExit(proc)))
       download?.stop()
+      await waitForExit(download?.child)
+      download = null
       // Only stop automatically-started workers. A user may have explicitly run
       // `witness distill start`; closing OpenCode must not kill that manual job.
       const proc = spawnWitness(["distill", "stop", "--auto-only"])
@@ -76,12 +140,9 @@ const plugin = async () => {
     event: async ({ event }) => {
       if (disposed || process.env.WITNESS_WORKER === "1") return
       const type = eventType(event)
-      if (type.startsWith("message.updated")) {
-        capture(event)
-        return
-      }
-      if (type.startsWith("session.idle")) {
-        capture(event)
+      if (type === "session.idle") {
+        clearRetry()
+        ensureDownload()
         syncOpenCode()
       }
     },

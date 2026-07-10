@@ -9,11 +9,13 @@
     "witness": "bin/witness.js"
   },
   "scripts": {
+    "check": "node --test ./*.test.js ./bin/*.test.js",
     "prepublishOnly": "../../scripts/stage-npm-opencode.sh --build"
   },
   "files": [
     "witness.js",
     "bin/",
+    "!bin/*.test.js",
     "dist/",
     "prompts/",
     "README.md"

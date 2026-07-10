@@ -5,6 +5,13 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { modelDir } from "./model.js"
 
+const command = process.argv[2] || ""
+
+if (command === "install" || command === "uninstall") {
+  console.error("witness: `install` and `uninstall` are source-checkout commands. With @witness-ai/opencode, add the plugin to opencode.json and let the plugin auto-register MCP.")
+  process.exit(1)
+}
+
 function binaryName() {
   const os = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform]
   const arch = { x64: "amd64", arm64: "arm64" }[process.arch]
@@ -29,6 +36,7 @@ if (!bin || !existsSync(bin)) {
 const env = { ...process.env }
 env.WITNESS_ASSETS ||= modelDir()
 env.WITNESS_RUNNER ||= "opencode"
+env.WITNESS_NPM_PACKAGE = "1"
 
 const result = spawnSync(bin, process.argv.slice(2), {
   stdio: "inherit",
