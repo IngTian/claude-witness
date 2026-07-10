@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { unlinkSync } from "node:fs"
+import { readFileSync, unlinkSync } from "node:fs"
 import { downloadModel, modelReady, startModelDownload } from "./model.js"
 
 const args = process.argv.slice(2)
@@ -14,10 +14,12 @@ if (args[0] === "--background") {
 
 const packageRoot = args[0] === "--foreground" ? args[1] || defaultRoot : args[0] || defaultRoot
 const lock = args[0] === "--foreground" ? args[2] || "" : ""
+const lockToken = args[0] === "--foreground" ? args[3] || "" : ""
 
 function releaseLock() {
   if (!lock) return
   try {
+    if (lockToken && readFileSync(lock, "utf8").trim() !== lockToken) return
     unlinkSync(lock)
   } catch {}
 }
