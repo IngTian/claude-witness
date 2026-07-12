@@ -125,7 +125,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 
 	cfg := st.LoadConfig()
 	// Resolve the effective runner ONCE here and overwrite cfg.Runner, so the single
-	// Runner built below (distill.NewRunner) inherits it with no per-site dispatch.
+	// Runner built below (platform.RunnerFor) inherits it with no per-site dispatch.
 	// This is what lets an npm OpenCode user — who never ran `install`, so config
 	// says the default "claude" — distill via OpenCode: their plugin passes
 	// WITNESS_RUNNER=opencode. An explicit `install` choice (runner_bound) still wins
