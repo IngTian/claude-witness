@@ -2,6 +2,15 @@
 
 OpenCode plugin for witness. It reconciles OpenCode's local session database on startup and when a session goes idle, and starts witness distillation only through the CLI's laptop-friendly auto-start gate.
 
+## Supported platforms
+
+| Operating system | Architecture | Installed binary package |
+| --- | --- | --- |
+| macOS | Apple Silicon (`darwin/arm64`) | `@witness-ai/opencode-darwin-arm64` |
+| Linux | x86-64 (`linux/x64`) | `@witness-ai/opencode-linux-x64` |
+
+These are the only platforms supported by the npm distribution. macOS Intel, Linux ARM, and Windows are not supported. The CLI exits with a clear supported-platform message on those systems.
+
 ## Install
 
 Add the npm plugin to your OpenCode config. OpenCode installs the package automatically with Bun on startup, and the plugin auto-registers `mcp.witness` if you have not already defined one:
@@ -10,6 +19,15 @@ Add the npm plugin to your OpenCode config. OpenCode installs the package automa
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": ["@witness-ai/opencode"]
+}
+```
+
+To test a prerelease, pin the plugin entry to the beta version instead of the unversioned package name:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@witness-ai/opencode@beta"]
 }
 ```
 
@@ -25,7 +43,14 @@ Optional: run the CLI ad hoc without a global install:
 npm exec --yes --package=@witness-ai/opencode -- witness doctor
 ```
 
-The package includes the `witness` CLI, a bundled platform binary, and prompts. The npm tarball is about 96MB, and the first model download is about 470MB into the witness data directory (`assets/e5-small`). The OpenCode plugin starts that model download only while OpenCode is running; if OpenCode stops before it finishes, the plugin stops its downloader and retries later with bounded backoff. The plugin uses the bundled binary first, then falls back to `WITNESS_BIN` or `witness` from `PATH`.
+The main package includes the plugin, CLI wrapper, and prompts. npm installs one optional platform package containing the matching `witness` binary; it does not download binaries for other operating systems or architectures. The first embedding-model download is about 470MB into the witness data directory (`assets/e5-small`). `npm install` only installs the packages; the OpenCode plugin starts the model download when OpenCode next starts. Keep OpenCode running until the first download finishes. If OpenCode stops early, the plugin stops its downloader and retries later with bounded backoff. Set `WITNESS_BIN` to override the platform package binary.
+
+After the download completes, verify the model, OpenCode runner, archive, and queue:
+
+```sh
+npm exec --yes --package=@witness-ai/opencode@beta -- witness doctor
+npm exec --yes --package=@witness-ai/opencode@beta -- witness distill status
+```
 
 By default the model is downloaded from Hugging Face. A custom `WITNESS_MODEL_BASE_URL` must serve the same paths (`onnx/model.onnx` and `tokenizer.json`) and also set `WITNESS_MODEL_SHA256` plus `WITNESS_TOKENIZER_SHA256`.
 

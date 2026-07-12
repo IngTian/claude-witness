@@ -1,26 +1,18 @@
 import { existsSync } from "node:fs"
-import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { modelDir, modelReady, startModelDownload } from "./bin/model.js"
+import { platformWitnessBin } from "./bin/platform.js"
 
-const PACKAGE_ROOT = path.dirname(fileURLToPath(import.meta.url))
+const PACKAGE_ROOT = fileURLToPath(new URL(".", import.meta.url))
 const DOWNLOAD_RETRY_MAX = 6
 const DOWNLOAD_RETRY_BASE_MS = 1000
 const DOWNLOAD_RETRY_CAP_MS = 30000
 
-function bundledWitnessBin() {
-  const os = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform]
-  const arch = { x64: "amd64", arm64: "arm64" }[process.arch]
-  if (!os || !arch) return ""
-  const name = `witness-${os}-${arch}${os === "windows" ? ".exe" : ""}`
-  const bin = path.join(PACKAGE_ROOT, "dist", name)
-  return existsSync(bin) ? bin : ""
-}
-
-const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || bundledWitnessBin() || "witness"
+const platformBin = platformWitnessBin()
+const WITNESS_BIN = globalThis.WITNESS_SHIM || process.env.WITNESS_BIN || (existsSync(platformBin) ? platformBin : "")
 
 function spawnWitness(args, payload) {
-  if (process.env.WITNESS_WORKER === "1") return
+  if (!WITNESS_BIN || process.env.WITNESS_WORKER === "1") return
   try {
     const env = { ...process.env, WITNESS_OPENCODE_PLUGIN: "1" }
     env.WITNESS_ASSETS ||= modelDir(PACKAGE_ROOT)
@@ -105,10 +97,13 @@ const plugin = async () => {
     return proc
   }
 
-  ensureDownload()
-  syncOpenCode()
+  if (WITNESS_BIN) {
+    ensureDownload()
+    syncOpenCode()
+  }
   return {
     config: async (input) => {
+      if (!WITNESS_BIN) return
       input.mcp ||= {}
       if (input.mcp.witness) return
       input.mcp.witness = {
@@ -138,7 +133,7 @@ const plugin = async () => {
       await proc?.exited?.catch?.(() => {})
     },
     event: async ({ event }) => {
-      if (disposed || process.env.WITNESS_WORKER === "1") return
+      if (!WITNESS_BIN || disposed || process.env.WITNESS_WORKER === "1") return
       const type = eventType(event)
       if (type === "session.idle") {
         clearRetry()

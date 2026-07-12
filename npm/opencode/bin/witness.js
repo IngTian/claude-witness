@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
-import path from "node:path"
-import { fileURLToPath } from "node:url"
 import { modelDir } from "./model.js"
+import { platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"
 
 const command = process.argv[2] || ""
 
@@ -12,19 +11,12 @@ if (command === "install" || command === "uninstall") {
   process.exit(1)
 }
 
-function binaryName() {
-  const os = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform]
-  const arch = { x64: "amd64", arm64: "arm64" }[process.arch]
-  if (!os || !arch) return ""
-  return `witness-${os}-${arch}${os === "windows" ? ".exe" : ""}`
-}
-
-const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
-const name = binaryName()
-const bin = name ? path.join(packageRoot, "dist", name) : ""
+const packageName = platformPackage()
+const bin = platformWitnessBin()
 
 if (!bin || !existsSync(bin)) {
-  console.error(`witness: no bundled binary for ${process.platform}/${process.arch}`)
+  const reason = packageName ? `optional package ${packageName} is not installed` : `unsupported platform ${process.platform}/${process.arch}`
+  console.error(`witness: ${reason}; supported platforms: ${supportedPlatforms()}`)
   process.exit(1)
 }
 

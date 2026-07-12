@@ -55,14 +55,20 @@ async function loadPlugin(harness) {
       export function startModelDownload(packageRoot, options = {}) { return harness.startModelDownload(packageRoot, options) }
     `,
   )
+  await writeFile(
+    path.join(dir, "bin", "platform.js"),
+    `export function platformWitnessBin() { return globalThis.__witnessTestHarness.platformBin?.() || "" }`,
+  )
 
   const previous = {
     Bun: globalThis.Bun,
     WITNESS_SHIM: globalThis.WITNESS_SHIM,
+    WITNESS_BIN: process.env.WITNESS_BIN,
     harness: globalThis.__witnessTestHarness,
   }
   globalThis.__witnessTestHarness = harness
-  globalThis.WITNESS_SHIM = "/shim/witness"
+  globalThis.WITNESS_SHIM = Object.hasOwn(harness, "shim") ? harness.shim : "/shim/witness"
+  if (Object.hasOwn(harness, "witnessBin")) process.env.WITNESS_BIN = harness.witnessBin
   globalThis.Bun = {
     spawn(args) {
       return harness.spawn(args)
@@ -76,11 +82,42 @@ async function loadPlugin(harness) {
     async restore() {
       globalThis.Bun = previous.Bun
       globalThis.WITNESS_SHIM = previous.WITNESS_SHIM
+      if (previous.WITNESS_BIN === undefined) delete process.env.WITNESS_BIN
+      else process.env.WITNESS_BIN = previous.WITNESS_BIN
       globalThis.__witnessTestHarness = previous.harness
       await rm(dir, { recursive: true, force: true })
     },
   }
 }
+
+test("npm plugin stays inactive when no supported platform binary is available", async () => {
+  const harness = {
+    shim: "",
+    witnessBin: "",
+    platformBin: () => "",
+    modelDir: () => "/assets/e5-small",
+    modelReady() {
+      throw new Error("unsupported platforms should not inspect the model")
+    },
+    startModelDownload() {
+      throw new Error("unsupported platforms should not download the model")
+    },
+    spawn() {
+      throw new Error("unsupported platforms should not spawn witness")
+    },
+  }
+  const { mod, restore } = await loadPlugin(harness)
+  try {
+    const hooks = await mod.default()
+    const input = {}
+    await hooks.config(input)
+    await hooks.event({ event: { type: "session.idle" } })
+    await hooks.dispose()
+    assert.deepEqual(input, {})
+  } finally {
+    await restore()
+  }
+})
 
 test("npm plugin reconciles on init/idle, ignores message.updated, and auto-registers MCP only when absent", async () => {
   const events = []

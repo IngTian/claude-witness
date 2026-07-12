@@ -10,6 +10,7 @@ const source = (await readFile(sourcePath, "utf8"))
   .replace('import { spawnSync } from "node:child_process"', 'const { spawnSync } = globalThis.__witnessCliHarness.childProcess')
   .replace('import { existsSync } from "node:fs"', 'const { existsSync } = globalThis.__witnessCliHarness.fs')
   .replace('import { modelDir } from "./model.js"', 'const { modelDir } = globalThis.__witnessCliHarness.model')
+  .replace('import { platformPackage, platformWitnessBin, supportedPlatforms } from "./platform.js"', 'const { platformPackage, platformWitnessBin, supportedPlatforms } = globalThis.__witnessCliHarness.platform')
 
 async function runCLI(argv, harness) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "witness-opencode-cli-"))
@@ -64,6 +65,17 @@ test("npm CLI gives a clear install/uninstall error before looking for bundled b
         return "/assets/e5-small"
       },
     },
+    platform: {
+      platformPackage() {
+        throw new Error("should not resolve platform for install/uninstall")
+      },
+      platformWitnessBin() {
+        throw new Error("should not resolve binary for install/uninstall")
+      },
+      supportedPlatforms() {
+        return "supported"
+      },
+    },
     childProcess: {
       spawnSync() {
         throw new Error("should not spawn install/uninstall")
@@ -89,6 +101,17 @@ test("npm CLI still forwards non-install commands to the bundled binary with wit
         return "/assets/e5-small"
       },
     },
+    platform: {
+      platformPackage() {
+        return "@witness-ai/opencode-darwin-arm64"
+      },
+      platformWitnessBin() {
+        return "/packages/darwin-arm64/bin/witness"
+      },
+      supportedPlatforms() {
+        return "supported"
+      },
+    },
     childProcess: {
       spawnSync(bin, args, options) {
         spawnCalls.push({ bin, args, options })
@@ -99,8 +122,26 @@ test("npm CLI still forwards non-install commands to the bundled binary with wit
   const result = await runCLI([process.execPath, "witness", "profile"], harness)
   assert.equal(result.code, 0)
   assert.equal(spawnCalls.length, 1)
+  assert.equal(spawnCalls[0].bin, "/packages/darwin-arm64/bin/witness")
   assert.deepEqual(spawnCalls[0].args, ["profile"])
   assert.equal(spawnCalls[0].options.env.WITNESS_ASSETS, "/assets/e5-small")
   assert.equal(spawnCalls[0].options.env.WITNESS_RUNNER, "opencode")
   assert.equal(spawnCalls[0].options.env.WITNESS_NPM_PACKAGE, "1")
+})
+
+test("npm CLI reports the supported matrix when no platform package is available", async () => {
+  const harness = {
+    fs: { existsSync: () => false },
+    model: { modelDir: () => "/assets/e5-small" },
+    platform: {
+      platformPackage: () => "",
+      platformWitnessBin: () => "",
+      supportedPlatforms: () => "macOS Apple Silicon and Linux x86-64",
+    },
+    childProcess: { spawnSync: () => { throw new Error("should not spawn") } },
+  }
+  const result = await runCLI([process.execPath, "witness", "doctor"], harness)
+  assert.equal(result.code, 1)
+  assert.match(result.errors[0], /unsupported platform/)
+  assert.match(result.errors[0], /macOS Apple Silicon and Linux x86-64/)
 })

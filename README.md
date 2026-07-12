@@ -233,10 +233,29 @@ The config-only path is the default: add the plugin to `~/.config/opencode/openc
 installs it automatically with Bun on startup. If `mcp.witness` is absent, the plugin auto-registers it
 for you.
 
+The npm distribution supports exactly these platforms:
+
+| Operating system | Architecture | npm platform package |
+| --- | --- | --- |
+| macOS | Apple Silicon (`darwin/arm64`) | `@witness-ai/opencode-darwin-arm64` |
+| Linux | x86-64 (`linux/x64`) | `@witness-ai/opencode-linux-x64` |
+
+macOS Intel, Linux ARM, and Windows are not supported by the npm distribution. Each binary is
+published as an optional platform package, so npm installs only the binary for the current machine.
+
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": ["@witness-ai/opencode"]
+}
+```
+
+To test the current prerelease without replacing `latest`, pin the plugin entry:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@witness-ai/opencode@beta"]
 }
 ```
 
@@ -252,19 +271,41 @@ Optional: run it ad hoc without a global install:
 npm exec --yes --package=@witness-ai/opencode -- witness doctor
 ```
 
-The npm tarball is about 96MB, and the first embedding-model download is about 470MB. The plugin owns
-that download only while OpenCode is running and stops it on shutdown; retries use bounded backoff.
+The main npm package contains the plugin, CLI wrapper, and prompts; the matching optional platform package
+contains one binary. The first embedding-model download is about 470MB. Installing the packages does not
+start that download: the plugin starts it when OpenCode next runs. Keep OpenCode running until the first
+download finishes. The plugin owns the downloader, stops it on shutdown, and retries later with bounded
+backoff.
 If you already have your own `mcp.witness` config, the plugin leaves it untouched. The npm wrapper does
 not support `witness install` / `witness uninstall`; those commands are for source-checkout installs.
 Custom model mirrors must provide `WITNESS_MODEL_SHA256` and `WITNESS_TOKENIZER_SHA256` alongside
 `WITNESS_MODEL_BASE_URL`.
 
+After the first download, verify the model, OpenCode runner, archive, and queue:
+
+```sh
+npm exec --yes --package=@witness-ai/opencode@beta -- witness doctor
+npm exec --yes --package=@witness-ai/opencode@beta -- witness distill status
+```
+
 The npm package lives in [`npm/opencode`](npm/opencode). Stage prebuilt binaries and prompts before publishing:
 
 ```sh
 make npm-opencode-package
-(cd npm/opencode && npm publish --access public)
+npm publish ./npm/platform/darwin-arm64 --access public --tag beta
+npm publish ./npm/platform/linux-x64 --access public --tag beta
+(cd npm/opencode && npm publish --access public --ignore-scripts --tag beta)
 ```
+
+Configure npm Trusted Publishing separately for the main package and both platform packages before using
+the release workflow. The npm package page renders [`npm/opencode/README.md`](npm/opencode/README.md);
+the workflow verifies after publishing that npm identifies it as the package README and that the published
+tarball contains it.
+
+For the first platform-package release only, publish both platform packages manually before creating the
+GitHub Release, then configure their Trusted Publishers on npm. npm requires a package to exist before its
+package-level Trusted Publisher can be configured. The release workflow is idempotent: it skips an already
+published package version, publishes any missing platform versions first, then publishes the main package.
 
 Manual verification path:
 
