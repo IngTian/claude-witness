@@ -24,7 +24,7 @@ type Summarizer struct {
 	Config        store.Config
 	LensPrompt    string        // prompts/summarize/lens.md
 	UnifiedPrompt string        // prompts/summarize/unified.md
-	Run           SummarizeFunc // nil => the package Run (real claude -p)
+	Run           SummarizeFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
 }
 
 // Summarize regenerates every per-lens summary from current facets, then the
@@ -52,16 +52,9 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		return nil // no facets yet — nothing to summarize
 	}
 
-	runFn := sm.Run
-	if runFn == nil {
-		runFn = func(ctx context.Context, model, prompt, input string) (string, error) {
-			return RunWith(ctx, sm.Config.Runner, model, prompt, input)
-		}
-	}
-
 	var portrait strings.Builder
 	for _, l := range lenses {
-		md, err := runFn(ctx, sm.Config.DistillModel, sm.LensPrompt, renderFacetsForSummary(l, byLens[l]))
+		md, err := sm.Run(ctx, sm.Config.DistillModel, sm.LensPrompt, renderFacetsForSummary(l, byLens[l]))
 		if err != nil {
 			return fmt.Errorf("summarize lens %s: %w", l, err)
 		}
@@ -71,7 +64,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, md)
 	}
 
-	umd, err := runFn(ctx, sm.Config.DistillModel, sm.UnifiedPrompt, portrait.String())
+	umd, err := sm.Run(ctx, sm.Config.DistillModel, sm.UnifiedPrompt, portrait.String())
 	if err != nil {
 		return fmt.Errorf("summarize unified: %w", err)
 	}

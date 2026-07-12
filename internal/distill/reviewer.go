@@ -26,7 +26,7 @@ type Reviewer struct {
 	Store  *store.Store
 	Lenses []*lens.Lens
 	Config store.Config
-	Runner MineFunc // nil => RunWith using Config.Runner
+	Runner MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
 }
 
 // reviewedFacet is what the review prompt returns per facet it asserts.
@@ -113,13 +113,7 @@ func (r *Reviewer) applyFacet(byKey map[string]*store.Facet, lensName string, rf
 func (r *Reviewer) reviewLens(ctx context.Context, ln *lens.Lens, obs []store.Observation, prior []store.Facet) ([]reviewedFacet, error) {
 	input := "OBSERVATIONS (L1):\n" + mustJSON(slimObs(obs)) +
 		"\n\nCURRENT PROFILE (L2, this lens):\n" + mustJSON(slimFacets(prior, ln.Name))
-	runFn := r.Runner
-	if runFn == nil {
-		runFn = func(ctx context.Context, model, prompt, input string) (string, error) {
-			return RunWith(ctx, r.Config.Runner, model, prompt, input)
-		}
-	}
-	reply, err := runFn(ctx, r.Config.DistillModel, ln.Review, input)
+	reply, err := r.Runner(ctx, r.Config.DistillModel, ln.Review, input)
 	if err != nil {
 		return nil, err
 	}

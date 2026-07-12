@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/lens"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/IngTian/witness/internal/vector"
 )
@@ -39,9 +40,21 @@ type Embedder interface {
 	Embed(text string) ([]float32, error)
 }
 
-// MineFunc runs one extraction pass (the `claude -p` call). Injectable so tests
-// can drive the worker without spawning a real model. Nil => the package Run.
+// MineFunc runs one extraction pass (one LLM call). Injectable so tests can drive
+// the worker without spawning a real model. It is the narrow seam the Worker/
+// Reviewer/Summarizer actually call; production wires it to a Runner (see
+// runnerMine), tests supply a fake directly.
 type MineFunc func(ctx context.Context, model, prompt, input string) (string, error)
+
+// RunnerMine adapts a platform.Runner into the MineFunc seam. This keeps the
+// injectable MineFunc for tests while routing production through the single Runner
+// (platform.RunnerFor) resolved once per drain. distill knows only platform.Runner
+// — never which runtime it is.
+func RunnerMine(r platform.Runner) MineFunc {
+	return func(ctx context.Context, model, prompt, input string) (string, error) {
+		return r.Run(ctx, model, prompt, input)
+	}
+}
 
 // dedupThreshold: a mined observation whose nearest existing same-lens neighbor
 // scores above this is treated as a duplicate and dropped. e5 cosines run high,
@@ -60,7 +73,7 @@ type Worker struct {
 	Embedder Embedder
 	Lenses   []*lens.Lens // default (always) + any config-enabled lenses; all global, applied to every session regardless of source (CC or OpenCode)
 	Config   store.Config
-	Run      MineFunc // nil => the package Run (real `claude -p`)
+	Run      MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
 }
 
 // Process runs the fast-path pass for a session, distilling only the records that
@@ -110,7 +123,7 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 	var mined []store.Observation
 	mineFailed := false
 	if len(newRecs) > 0 {
-		for _, transcript := range distillInputs(session, newRecs) {
+		for _, transcript := range distillInputs(w.Store, session, newRecs) {
 			for _, ln := range w.Lenses {
 				obs, err := w.mine(ctx, ln, session, transcript)
 				if err != nil {
@@ -214,13 +227,7 @@ type minedObs struct {
 }
 
 func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript string) ([]store.Observation, error) {
-	runFn := w.Run
-	if runFn == nil {
-		runFn = func(ctx context.Context, model, prompt, input string) (string, error) {
-			return RunWith(ctx, w.Config.Runner, model, prompt, input)
-		}
-	}
-	reply, err := runFn(ctx, w.Config.TriageModel, ln.Extract, transcript)
+	reply, err := w.Run(ctx, w.Config.TriageModel, ln.Extract, transcript)
 	if err != nil {
 		return nil, err
 	}
@@ -253,17 +260,6 @@ func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript st
 		})
 	}
 	return obs, nil
-}
-
-func renderTranscript(raw []store.RawRecord) string {
-	var b strings.Builder
-	for _, r := range raw {
-		b.WriteString(strings.ToUpper(r.Role))
-		b.WriteString(": ")
-		b.WriteString(r.Text)
-		b.WriteString("\n\n")
-	}
-	return b.String()
 }
 
 func obsID(session, lens, text string) string {

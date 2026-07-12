@@ -21,7 +21,6 @@ const (
 	SessionPrefix        = "opencode:"
 	syncMetaKey          = "opencode_sync_time_updated_ms"
 	importKeysMetaPrefix = "opencode_import_keys:"
-	witnessDistillTitle  = "witness-distill"
 )
 
 // Importer mirrors OpenCode text messages into witness raw records. It treats
@@ -132,22 +131,33 @@ func sqliteURI(path string) string {
 }
 
 func (im *Importer) sessions(ctx context.Context, db *sql.DB, ids []string) ([]sessionRow, error) {
+	// Exclude witness's OWN distill sessions via the NULL-safe negation of the shared
+	// self-traffic predicate (same authoritative column cleanup DELETEs by, so read
+	// and delete never disagree). Agent-authoritative: fixes the old title-only
+	// filter that OpenCode's auto-titler could defeat by renaming a witness-distill
+	// session. selfTrafficExclude uses `IS NOT` (not `NOT (...=...)`) so a NULL agent
+	// — every pre-agent-column user session after ADD COLUMN — is correctly kept, not
+	// silently dropped by SQL three-valued logic. Older schemas fall back to title.
+	notSelf, selfArgs := selfTrafficExclude(sessionHasAgentColumn(ctx, db))
+
+	const cols = `SELECT id, directory, title, time_created, time_updated FROM session`
 	if len(ids) > 0 {
 		placeholders := make([]string, len(ids))
-		args := make([]any, 0, len(ids)+1)
+		args := make([]any, 0, len(ids)+len(selfArgs))
 		for i, id := range ids {
 			placeholders[i] = "?"
 			args = append(args, strings.TrimPrefix(id, SessionPrefix))
 		}
-		args = append(args, witnessDistillTitle)
-		q := `SELECT id, directory, title, time_created, time_updated FROM session WHERE id IN (` + strings.Join(placeholders, ",") + `) AND title != ? ORDER BY time_updated`
+		args = append(args, selfArgs...)
+		q := cols + ` WHERE id IN (` + strings.Join(placeholders, ",") + `) AND ` + notSelf + ` ORDER BY time_updated`
 		return scanSessions(ctx, db, q, args...)
 	}
 	last, _ := strconv.ParseInt(strings.TrimSpace(im.Store.MetaString(syncMetaKey)), 10, 64)
 	if last > 0 {
-		return scanSessions(ctx, db, `SELECT id, directory, title, time_created, time_updated FROM session WHERE time_updated >= ? AND title != ? ORDER BY time_updated`, last, witnessDistillTitle)
+		args := append([]any{last}, selfArgs...)
+		return scanSessions(ctx, db, cols+` WHERE time_updated >= ? AND `+notSelf+` ORDER BY time_updated`, args...)
 	}
-	return scanSessions(ctx, db, `SELECT id, directory, title, time_created, time_updated FROM session WHERE title != ? ORDER BY time_updated`, witnessDistillTitle)
+	return scanSessions(ctx, db, cols+` WHERE `+notSelf+` ORDER BY time_updated`, selfArgs...)
 }
 
 func scanSessions(ctx context.Context, db *sql.DB, q string, args ...any) ([]sessionRow, error) {
@@ -201,6 +211,9 @@ func (im *Importer) importSession(ctx context.Context, db *sql.DB, s sessionRow)
 	if err := im.Store.ApplyRawImport(meta, records, stateKey, string(stateValue), replace); err != nil {
 		return 0, err
 	}
+	// Stamp the owning platform so platform.ForSession is column-authoritative
+	// (prefix remains the fallback for rows imported before this).
+	im.Store.SetSessionPlatform(session, "opencode")
 	return len(records), nil
 }
 

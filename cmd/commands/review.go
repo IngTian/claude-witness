@@ -3,10 +3,10 @@ package commands
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -30,6 +30,20 @@ func cmdReview() error {
 	}
 	defer st.Close()
 	defer setupLogging(st)()
+
+	// Hold the SAME single-consumer lock the worker uses. A runner's Close() runs the
+	// OpenCode self-traffic cleanup sweep (agent='witness-distill' AND time_created <
+	// now+1s), which is process-global; without this lock a foreground `review`
+	// overlapping a background worker's mid-drain `opencode serve` could delete the
+	// worker's live in-flight distill session and fail its mine. The lock makes
+	// runner + sweep single-flight, which is what the +1s window assumes.
+	unlock, ok := st.WorkerLock()
+	if !ok {
+		fmt.Println("a distillation worker is already running; skipping review (it reviews as part of that drain)")
+		return nil
+	}
+	defer unlock()
+
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
@@ -37,15 +51,19 @@ func cmdReview() error {
 		return err
 	}
 	ctx := context.Background()
-	var runFn distill.MineFunc
-	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
-		opencodeServer, err := distill.StartOpenCodeServer(ctx, cfg.TriageModel, cfg.DistillModel)
-		if err != nil {
-			return err
-		}
-		defer opencodeServer.Close()
-		runFn = opencodeServer.Run
+	// Same runner lifecycle as the worker: Open before use, Close after. Close runs
+	// the OpenCode self-traffic cleanup sweep — which this path previously OMITTED
+	// (it deferred only the server's Close), leaking witness-distill sessions back
+	// into the pending queue. Routing through the Runner makes that impossible.
+	runner, err := platform.RunnerFor(st, cfg)
+	if err != nil {
+		return err
 	}
+	if err := runner.Open(ctx); err != nil {
+		return err
+	}
+	defer runner.Close()
+	runFn := distill.RunnerMine(runner)
 	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn}
 	if err := r.Run(ctx, time.Now()); err != nil {
 		return err

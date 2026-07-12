@@ -1,16 +1,13 @@
 package commands
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"time"
 
-	"github.com/IngTian/witness/internal/runtimes"
-	runtimeclaude "github.com/IngTian/witness/internal/runtimes/claude"
-	opencodeimport "github.com/IngTian/witness/internal/runtimes/opencode"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -29,7 +26,7 @@ func newInternalCaptureCmd() *cobra.Command {
 			return cmdCapture(args)
 		},
 	}
-	c.Flags().StringVar(&agent, "agent", string(runtimes.AgentClaude), "internal capture agent")
+	c.Flags().StringVar(&agent, "agent", string(platform.AgentClaude), "internal capture agent")
 	return c
 }
 
@@ -37,7 +34,7 @@ func newInternalCaptureCmd() *cobra.Command {
 // Best-effort: it logs failures (so they're diagnosable) but always returns nil
 // so a capture problem never breaks the user's session.
 func cmdCapture(args []string) error {
-	agent, err := agentFlag(args, runtimes.AgentClaude)
+	agent, err := agentFlag(args, platform.AgentClaude)
 	if err != nil {
 		return err
 	}
@@ -53,22 +50,14 @@ func cmdCapture(args []string) error {
 		slog.Warn("capture: unreadable hook event", "err", err)
 		return nil
 	}
-	switch agent {
-	case runtimes.AgentClaude:
-		var e runtimeclaude.HookEvent
-		if err := json.Unmarshal(data, &e); err != nil {
-			slog.Warn("capture: unreadable claude hook event", "err", err)
-			return nil
-		}
-		if err := runtimeclaude.Capture(st, e, time.Now()); err != nil {
-			slog.Error("capture: append raw failed", "agent", agent, "session", e.SessionID, "err", err)
-		}
-	case runtimes.AgentOpenCode:
-		if _, err := opencodeimport.Capture(st, data, time.Now()); err != nil {
-			slog.Error("capture: opencode event failed", "err", err)
-		}
-	default:
+	p, ok := platform.ByName(agent)
+	if !ok {
 		return fmt.Errorf("unknown capture agent %q", agent)
+	}
+	if _, err := p.Capture(st, data, time.Now()); err != nil {
+		// Best-effort: a malformed payload or write error is logged, never fatal —
+		// capture must never break the user's session.
+		slog.Error("capture: event failed", "agent", agent, "err", err)
 	}
 	return nil
 }
