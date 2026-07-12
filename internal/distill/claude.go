@@ -33,25 +33,6 @@ func newClaudeCmd(ctx context.Context, model string) *exec.Cmd {
 	return cmd
 }
 
-// Run invokes the default Claude runner headlessly and returns the model's text
-// reply. Kept as the package default for existing callers and tests.
-func Run(ctx context.Context, model, systemPrompt, input string) (string, error) {
-	return RunWith(ctx, "claude", model, systemPrompt, input)
-}
-
-// RunWith invokes the selected headless runner and returns the model's text
-// reply. runner is "claude" (default) or "opencode".
-func RunWith(ctx context.Context, runner, model, systemPrompt, input string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(runner)) {
-	case "", "claude":
-		return runClaude(ctx, model, systemPrompt, input)
-	case "opencode":
-		return runOpenCode(ctx, model, systemPrompt, input)
-	default:
-		return "", fmt.Errorf("unknown distillation runner %q (want claude or opencode)", runner)
-	}
-}
-
 // runClaude invokes `claude -p` headlessly and returns the model's text reply. It sets
 // WITNESS_WORKER=1 so the witness hooks short-circuit inside this nested run (the
 // recursion guard). systemPrompt is the trusted witness instruction (a lens

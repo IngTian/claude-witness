@@ -6,13 +6,11 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
 	"github.com/IngTian/witness/internal/lens"
-	opencodeimport "github.com/IngTian/witness/internal/runtimes/opencode"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -125,12 +123,12 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	}
 
 	cfg := st.LoadConfig()
-	// Resolve the effective runner ONCE here and overwrite cfg.Runner, so every
-	// downstream consumer (the opencode-serve branch below, Worker/Reviewer/
-	// Summarizer's RunWith) inherits it with no per-site change. This is what lets
-	// an npm OpenCode user — who never ran `install`, so config says the default
-	// "claude" — distill via OpenCode: their plugin passes WITNESS_RUNNER=opencode.
-	// An explicit `install` choice (runner_bound) still wins (see ResolveRunner).
+	// Resolve the effective runner ONCE here and overwrite cfg.Runner, so the single
+	// Runner built below (distill.NewRunner) inherits it with no per-site dispatch.
+	// This is what lets an npm OpenCode user — who never ran `install`, so config
+	// says the default "claude" — distill via OpenCode: their plugin passes
+	// WITNESS_RUNNER=opencode. An explicit `install` choice (runner_bound) still wins
+	// (see ResolveRunner).
 	cfg.Runner = st.ResolveRunner(cfg)
 	lenses, err := activeLenses(st)
 	if err != nil {
@@ -156,20 +154,22 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		p, _ := st.PendingSessionsUpdatedBetween(timeRange.since, timeRange.until)
 		return p
 	}
-	var runFn distill.MineFunc
-	if (len(pending()) > 0 || st.ReviewDue(cfg)) && strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
-		cleanupOpenCodeDistillSessions(ctx, time.Now().Add(-1*time.Hour))
-		opencodeServer, err := distill.StartOpenCodeServer(ctx, cfg.TriageModel, cfg.DistillModel)
-		if err != nil {
-			slog.Error("opencode serve", "err", err)
+	// Resolve the global distillation runner once and, if there's work, Open it for
+	// the whole drain (OpenCode: one `opencode serve` + a pre-cleanup sweep; Claude:
+	// no-op). Close runs the paired post-cleanup — so nothing leaks distill sessions.
+	runner, err := distill.NewRunner(cfg)
+	if err != nil {
+		slog.Error("resolve runner", "err", err)
+		return true, err
+	}
+	if len(pending()) > 0 || st.ReviewDue(cfg) {
+		if err := runner.Open(ctx); err != nil {
+			slog.Error("open runner", "runner", cfg.Runner, "err", err)
 			return true, err
 		}
-		defer func() {
-			_ = opencodeServer.Close()
-			cleanupOpenCodeDistillSessions(context.Background(), time.Now().Add(time.Second))
-		}()
-		runFn = opencodeServer.Run
 	}
+	defer runner.Close()
+	runFn := distill.RunnerMine(runner)
 	sessionBudget := workerSessionBudget(cfg, auto)
 	processedSessions := drainQueueLimit(pending, func(session string) {
 		if st.MetaString("worker_stop_requested") == "1" {
@@ -225,22 +225,6 @@ func workerSessionBudget(cfg store.Config, auto bool) int {
 
 func workerBudgetReached(auto bool, sessionBudget, processedSessions, remainingPending int) bool {
 	return auto && sessionBudget > 0 && processedSessions >= sessionBudget && remainingPending > 0
-}
-
-func cleanupOpenCodeDistillSessions(ctx context.Context, before time.Time) {
-	dbPath, err := opencodeimport.DefaultDBPath()
-	if err != nil {
-		slog.Warn("opencode cleanup: locate db", "err", err)
-		return
-	}
-	deleted, err := opencodeimport.CleanupWitnessDistillSessions(ctx, dbPath, before)
-	if err != nil {
-		slog.Warn("opencode cleanup: witness-distill sessions", "err", err)
-		return
-	}
-	if deleted > 0 {
-		slog.Info("opencode cleanup: removed witness-distill sessions", "count", deleted)
-	}
 }
 
 // regenerateProfile refreshes the L4 narrative summaries from the current facets.
