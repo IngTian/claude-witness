@@ -1,13 +1,41 @@
 package platform_test
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/IngTian/witness/internal/platform"
 	_ "github.com/IngTian/witness/internal/platform/claude"
 	_ "github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/store"
 )
+
+// A platform whose Name() is non-lowercase/padded must still be resolvable —
+// Register and ByName must normalize identically, or a third-party platform (the
+// PR's headline extensibility) would register yet be unreachable via ForSession/
+// RunnerFor. Uses a throwaway name so it doesn't collide with the real platforms.
+func TestRegisterNormalizesNameLikeByName(t *testing.T) {
+	platform.Register(mixedCasePlatform{})
+	if _, ok := platform.ByName("mixedcaseplat"); !ok {
+		t.Fatal("a platform registered with a MixedCase Name() must resolve via its normalized name")
+	}
+	if _, ok := platform.ByName("  MixedCasePlat "); !ok {
+		t.Fatal("ByName must resolve the same padded/mixed-case form Register accepted")
+	}
+}
+
+type mixedCasePlatform struct{}
+
+func (mixedCasePlatform) Name() string                              { return " MixedCasePlat " }
+func (mixedCasePlatform) SessionPrefix() string                     { return "mixedcaseplat:" }
+func (mixedCasePlatform) RenderInputs(r []store.RawRecord) []string { return []string{""} }
+func (mixedCasePlatform) Capture(*store.Store, []byte, time.Time) (bool, error) {
+	return false, nil
+}
+func (mixedCasePlatform) Import(context.Context, *store.Store) (platform.ImportStats, error) {
+	return platform.ImportStats{}, nil
+}
 
 func TestByNameAndDefault(t *testing.T) {
 	if _, ok := platform.ByName("claude"); !ok {

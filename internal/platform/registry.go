@@ -85,9 +85,12 @@ const defaultName = "claude"
 
 // Register adds a platform to the registry. Intended for a subpackage init();
 // panics on a duplicate or empty name, since that is a programming error caught
-// at startup, not a runtime condition.
+// at startup, not a runtime condition. The name is normalized (lower+trim) with the
+// SAME rule ByName uses, so a platform whose Name() is non-lowercase/padded is still
+// resolvable (otherwise a third-party "Codex" would register yet be unreachable —
+// the exact extensibility this package promises).
 func Register(p Platform) {
-	name := p.Name()
+	name := normalizeName(p.Name())
 	if name == "" {
 		panic("platform: Register called with empty Name()")
 	}
@@ -97,11 +100,15 @@ func Register(p Platform) {
 	registry[name] = p
 }
 
+// normalizeName is the ONE normalization rule for platform names, used by both
+// Register and ByName so they can never key differently.
+func normalizeName(name string) string { return strings.ToLower(strings.TrimSpace(name)) }
+
 // ByName returns the registered platform for name, or (nil, false) if unknown.
 // Callers that must not silently accept an unknown platform (the fail-closed
 // contract) check the bool.
 func ByName(name string) (Platform, bool) {
-	p, ok := registry[strings.ToLower(strings.TrimSpace(name))]
+	p, ok := registry[normalizeName(name)]
 	return p, ok
 }
 
