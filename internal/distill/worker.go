@@ -39,9 +39,20 @@ type Embedder interface {
 	Embed(text string) ([]float32, error)
 }
 
-// MineFunc runs one extraction pass (the `claude -p` call). Injectable so tests
-// can drive the worker without spawning a real model. Nil => the package Run.
+// MineFunc runs one extraction pass (one LLM call). Injectable so tests can drive
+// the worker without spawning a real model. It is the narrow seam the Worker/
+// Reviewer/Summarizer actually call; production wires it to a Runner (see
+// runnerMine), tests supply a fake directly.
 type MineFunc func(ctx context.Context, model, prompt, input string) (string, error)
+
+// RunnerMine adapts a Runner into the MineFunc seam. This keeps the injectable
+// MineFunc for tests while routing production through the single Runner resolved
+// once per drain (no per-call runner-name switch).
+func RunnerMine(r Runner) MineFunc {
+	return func(ctx context.Context, model, prompt, input string) (string, error) {
+		return r.Run(ctx, model, prompt, input)
+	}
+}
 
 // dedupThreshold: a mined observation whose nearest existing same-lens neighbor
 // scores above this is treated as a duplicate and dropped. e5 cosines run high,
@@ -60,7 +71,7 @@ type Worker struct {
 	Embedder Embedder
 	Lenses   []*lens.Lens // default (always) + any config-enabled lenses; all global, applied to every session regardless of source (CC or OpenCode)
 	Config   store.Config
-	Run      MineFunc // nil => the package Run (real `claude -p`)
+	Run      MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
 }
 
 // Process runs the fast-path pass for a session, distilling only the records that
@@ -214,13 +225,7 @@ type minedObs struct {
 }
 
 func (w *Worker) mine(ctx context.Context, ln *lens.Lens, session, transcript string) ([]store.Observation, error) {
-	runFn := w.Run
-	if runFn == nil {
-		runFn = func(ctx context.Context, model, prompt, input string) (string, error) {
-			return RunWith(ctx, w.Config.Runner, model, prompt, input)
-		}
-	}
-	reply, err := runFn(ctx, w.Config.TriageModel, ln.Extract, transcript)
+	reply, err := w.Run(ctx, w.Config.TriageModel, ln.Extract, transcript)
 	if err != nil {
 		return nil, err
 	}

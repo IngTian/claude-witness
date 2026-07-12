@@ -180,9 +180,3 @@ func TestModelHint(t *testing.T) {
 		t.Fatalf("model hint = %q", got)
 	}
 }
-
-func TestRunWithRejectsUnknownRunner(t *testing.T) {
-	if _, err := RunWith(context.Background(), "bogus", "", "", ""); err == nil {
-		t.Fatalf("unknown runner should fail")
-	}
-}

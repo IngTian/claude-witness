@@ -97,17 +97,6 @@ func StartOpenCodeServer(ctx context.Context, models ...string) (*OpenCodeServer
 	return srv, nil
 }
 
-func runOpenCode(ctx context.Context, model, systemPrompt, input string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-	srv, err := StartOpenCodeServer(ctx, model)
-	if err != nil {
-		return "", err
-	}
-	defer srv.Close()
-	return srv.Run(ctx, model, systemPrompt, input)
-}
-
 // Run sends one isolated distillation request through the shared OpenCode serve
 // process. It uses OpenCode's async prompt endpoint so the HTTP request that
 // starts generation never has to stay open for the full model latency; completion
