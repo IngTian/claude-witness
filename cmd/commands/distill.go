@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
@@ -17,20 +18,20 @@ func newDistillCmd() *cobra.Command {
 		Long:  "Start, inspect, or stop the single-flight worker that turns raw turns into observations, reviews facets when due, and regenerates profiles.",
 	}
 	var quiet bool
+	var since string
+	var until string
 	start := &cobra.Command{
 		Use:   "start",
 		Short: "Kick the worker in the background.",
-		Long:  "Kick the distillation worker in the background. If another worker already holds the lock, the new process exits and queued work remains durable on disk.",
+		Long:  "Kick the distillation worker in the background. Optional bounds select pending sessions by their latest raw timestamp; values accept RFC3339, YYYY-MM-DD (UTC), or an age such as 7d or 24h. If another worker already holds the lock, the new process exits and queued work remains durable on disk.",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			args := []string{"start"}
-			if quiet {
-				args = append(args, "--quiet")
-			}
-			return cmdDistill(args)
+			return cmdDistillStart(quiet, since, until)
 		},
 	}
 	start.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
+	start.Flags().StringVar(&since, "since", "", "latest session update at or after this time (for example 7d or 2026-07-01)")
+	start.Flags().StringVar(&until, "until", "", "latest session update at or before this time")
 	distillCmd.AddCommand(start)
 	var statusJSON bool
 	statusCmd := &cobra.Command{
@@ -49,11 +50,7 @@ func newDistillCmd() *cobra.Command {
 		Long:  "Set the worker stop flag and send SIGTERM to the running worker process when it is still alive.",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			args := []string{"stop"}
-			if stopAutoOnly {
-				args = append(args, "--auto-only")
-			}
-			return cmdDistill(args)
+			return cmdDistillStop(stopAutoOnly)
 		},
 	}
 	stopCmd.Flags().BoolVar(&stopAutoOnly, "auto-only", false, "stop only an automatically-started worker")
@@ -62,32 +59,90 @@ func newDistillCmd() *cobra.Command {
 	return distillCmd
 }
 
-func cmdDistill(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("usage: witness distill <start|status|stop> [--quiet]")
+type sessionTimeRange struct {
+	since time.Time
+	until time.Time
+}
+
+func (r sessionTimeRange) empty() bool {
+	return r.since.IsZero() && r.until.IsZero()
+}
+
+func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
+	r, err := parseSessionTimeRange(sinceValue, untilValue, time.Now())
+	if err != nil {
+		return err
 	}
-	switch args[0] {
-	case "start":
-		quiet := len(args) > 1 && args[1] == "--quiet"
-		if len(args) > 2 || (len(args) == 2 && !quiet) {
-			return fmt.Errorf("usage: witness distill start [--quiet]")
-		}
-		spawnDetached("worker")
-		if !quiet {
-			fmt.Println("distill worker kicked in the background; run `witness distill status` to watch progress")
-		}
-		return nil
-	case "status":
-		return cmdDistillStatus(false)
-	case "stop":
-		autoOnly := len(args) > 1 && args[1] == "--auto-only"
-		if len(args) > 2 || (len(args) == 2 && !autoOnly) {
-			return fmt.Errorf("usage: witness distill stop [--auto-only]")
-		}
-		return cmdDistillStop(autoOnly)
-	default:
-		return fmt.Errorf("unknown distill subcommand %q (want start|status|stop)", args[0])
+	args := []string{"worker"}
+	if !r.since.IsZero() {
+		args = append(args, "--since", r.since.UTC().Format(time.RFC3339Nano))
 	}
+	if !r.until.IsZero() {
+		args = append(args, "--until", r.until.UTC().Format(time.RFC3339Nano))
+	}
+	spawnDetached(args...)
+	if !quiet {
+		fmt.Println("distill worker kicked in the background; run `witness distill status` to watch progress")
+	}
+	return nil
+}
+
+func parseSessionTimeRange(sinceValue, untilValue string, now time.Time) (sessionTimeRange, error) {
+	since, err := parseSessionTimeBound(sinceValue, now, false)
+	if err != nil {
+		return sessionTimeRange{}, fmt.Errorf("invalid --since: %w", err)
+	}
+	until, err := parseSessionTimeBound(untilValue, now, true)
+	if err != nil {
+		return sessionTimeRange{}, fmt.Errorf("invalid --until: %w", err)
+	}
+	if !since.IsZero() && !until.IsZero() && since.After(until) {
+		return sessionTimeRange{}, fmt.Errorf("--since must not be later than --until")
+	}
+	return sessionTimeRange{since: since, until: until}, nil
+}
+
+func parseSessionTimeBound(value string, now time.Time, endOfDay bool) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, nil
+	}
+	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return t, nil
+	}
+	if t, err := time.ParseInLocation("2006-01-02", value, time.UTC); err == nil {
+		if endOfDay {
+			return t.AddDate(0, 0, 1).Add(-time.Nanosecond), nil
+		}
+		return t, nil
+	}
+	age, err := parseSessionAge(value)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("expected RFC3339, YYYY-MM-DD, or an age such as 7d or 24h")
+	}
+	return now.Add(-age), nil
+}
+
+func parseSessionAge(value string) (time.Duration, error) {
+	unit := time.Duration(0)
+	suffix := ""
+	if strings.HasSuffix(value, "d") {
+		unit, suffix = 24*time.Hour, "d"
+	} else if strings.HasSuffix(value, "w") {
+		unit, suffix = 7*24*time.Hour, "w"
+	}
+	if unit != 0 {
+		n, err := strconv.ParseFloat(strings.TrimSuffix(value, suffix), 64)
+		if err != nil || n <= 0 {
+			return 0, fmt.Errorf("invalid age")
+		}
+		return time.Duration(n * float64(unit)), nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid age")
+	}
+	return d, nil
 }
 
 func cmdDistillStatus(asJSON bool) error {

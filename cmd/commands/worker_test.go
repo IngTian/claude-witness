@@ -45,6 +45,28 @@ func TestWorkerSessionBudgetUsesAutoLimit(t *testing.T) {
 	}
 }
 
+func TestParseSessionTimeRangeAcceptsRelativeAgeAndDate(t *testing.T) {
+	now := time.Date(2026, 7, 12, 15, 0, 0, 0, time.UTC)
+	r, err := parseSessionTimeRange("7d", "2026-07-12", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := now.Add(-7 * 24 * time.Hour); !r.since.Equal(want) {
+		t.Fatalf("since = %s, want %s", r.since, want)
+	}
+	wantUntil := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1).Add(-time.Nanosecond)
+	if !r.until.Equal(wantUntil) {
+		t.Fatalf("until = %s, want %s", r.until, wantUntil)
+	}
+}
+
+func TestParseSessionTimeRangeRejectsReversedRange(t *testing.T) {
+	_, err := parseSessionTimeRange("2026-07-12", "2026-07-01", time.Now())
+	if err == nil {
+		t.Fatal("reversed range should fail")
+	}
+}
+
 func TestWorkerBudgetReachedOnlyWhenWorkRemains(t *testing.T) {
 	if !workerBudgetReached(true, 1, 1, 2) {
 		t.Fatal("budget with remaining pending work should pause and reschedule")

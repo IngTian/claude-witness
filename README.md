@@ -95,6 +95,12 @@ witness lens enable  math                     # start running it on every sessio
 `register` stores a **copy** — editing the original afterward has no effect until you re-register.
 `enable` is the separate switch that makes it actually run.
 
+The source file may live anywhere. As a recommended canonical location, witness keeps the
+registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/lens.md` (normally
+`~/.local/share/witness/lenses/<name>/lens.md`, or `$WITNESS_HOME/lenses/<name>/lens.md`). You can
+edit that registered copy directly, but this location is a convention rather than a restriction on
+the file passed to `lens register`.
+
 ## Example: one moment, end to end
 
 Say a session contains this exchange (fictional):
@@ -169,7 +175,11 @@ by hand):
 - `witness import --agent opencode` — incrementally reconcile OpenCode's local session DB into L0
   and kick background distillation without waiting.
 - `witness import --agent claude` — kick distillation for already-captured Claude Code hook data.
-- `witness distill start|status|stop` — manage the background distillation worker.
+- `witness distill start|status|stop` — manage the background distillation worker. Manual starts
+  accept `--since`/`--until` to select pending sessions by their latest raw timestamp; for example,
+  `witness distill start --since 7d` distills sessions updated in the last seven days. Bounds also
+  accept RFC3339 timestamps or UTC dates (`YYYY-MM-DD`) and do not discard sessions outside the
+  selected range.
 - `witness cleanup` — interactively reclaim old raw transcripts (keeps observations + profile).
 - `witness export <path>` — write a consistent single-file snapshot of the archive (safe to back up / cloud-sync).
 - `witness doctor` — health check (verifies the embedder runs and EN/ZH retrieval works).

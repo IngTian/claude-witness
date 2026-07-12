@@ -19,13 +19,23 @@ import (
 
 func newInternalWorkerCmd() *cobra.Command {
 	var auto bool
+	var since string
+	var until string
 	c := &cobra.Command{Use: "worker", Hidden: true, RunE: func(_ *cobra.Command, args []string) error {
 		if auto {
 			args = append(args, "--auto")
 		}
+		if since != "" {
+			args = append(args, "--since", since)
+		}
+		if until != "" {
+			args = append(args, "--until", until)
+		}
 		return cmdWorker(args)
 	}}
 	c.Flags().BoolVar(&auto, "auto", false, "run with automatic distillation limits")
+	c.Flags().StringVar(&since, "since", "", "only sessions updated at or after this time")
+	c.Flags().StringVar(&until, "until", "", "only sessions updated at or before this time")
 	return c
 }
 
@@ -35,28 +45,45 @@ func newInternalWorkerCmd() *cobra.Command {
 // running, the new one no-ops immediately. The filesystem is the durable job
 // queue; this lock elects the single consumer that drains it.
 func cmdWorker(args []string) error {
-	auto, err := workerAutoFlag(args)
+	auto, timeRange, err := workerFlags(args)
 	if err != nil {
 		return err
 	}
-	_, err = runWorker(auto)
+	_, err = runWorkerInRange(auto, timeRange)
 	return err
 }
 
-func workerAutoFlag(args []string) (bool, error) {
+func workerFlags(args []string) (bool, sessionTimeRange, error) {
 	auto := false
-	for _, arg := range args {
-		switch arg {
+	since := ""
+	until := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
 		case "--auto":
 			auto = true
+		case "--since", "--until":
+			if i+1 >= len(args) {
+				return false, sessionTimeRange{}, fmt.Errorf("%s requires a value", args[i])
+			}
+			if args[i] == "--since" {
+				since = args[i+1]
+			} else {
+				until = args[i+1]
+			}
+			i++
 		default:
-			return false, fmt.Errorf("usage: witness worker [--auto]")
+			return false, sessionTimeRange{}, fmt.Errorf("usage: witness worker [--auto] [--since <time>] [--until <time>]")
 		}
 	}
-	return auto, nil
+	timeRange, err := parseSessionTimeRange(since, until, time.Now())
+	return auto, timeRange, err
 }
 
 func runWorker(auto bool) (bool, error) {
+	return runWorkerInRange(auto, sessionTimeRange{})
+}
+
+func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	st, err := store.Open()
 	if err != nil {
 		return false, err
@@ -93,7 +120,9 @@ func runWorker(auto bool) (bool, error) {
 		_ = st.SetMetaString("worker_current", "")
 		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
 	}()
-	defer scheduleRetryWakeup(st)
+	if timeRange.empty() {
+		defer scheduleRetryWakeup(st)
+	}
 
 	cfg := st.LoadConfig()
 	// Resolve the effective runner ONCE here and overwrite cfg.Runner, so every
@@ -123,7 +152,10 @@ func runWorker(auto bool) (bool, error) {
 		return emb, embErr
 	}
 
-	pending := func() []string { p, _ := st.PendingSessions(); return p }
+	pending := func() []string {
+		p, _ := st.PendingSessionsUpdatedBetween(timeRange.since, timeRange.until)
+		return p
+	}
 	var runFn distill.MineFunc
 	if (len(pending()) > 0 || st.ReviewDue(cfg)) && strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
 		cleanupOpenCodeDistillSessions(ctx, time.Now().Add(-1*time.Hour))
