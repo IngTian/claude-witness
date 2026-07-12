@@ -19,15 +19,30 @@ const MarkerName = "witness-distill"
 // we key on it alone; the title match is a fallback ONLY for older OpenCode schemas
 // with no agent column.
 //
-// Both sides of the self-traffic contract build from this one predicate so they can
-// never diverge: cleanup uses it directly (DELETE these), import NEGATES it (skip
-// these) — see the callers. hasAgent is resolved once per query from the live
-// schema (hasSessionColumn), keeping this pure/testable.
+// cleanup uses selfTrafficWhere directly (DELETE these); import uses
+// selfTrafficExclude (skip these). Both build from the same column choice so they
+// can never disagree on WHICH column is authoritative. hasAgent is resolved once
+// per query from the live schema, keeping these pure/testable.
 func selfTrafficWhere(hasAgent bool) (clause string, args []any) {
 	if hasAgent {
 		return `agent = ?`, []any{MarkerName}
 	}
 	return `title = ?`, []any{MarkerName}
+}
+
+// selfTrafficExclude builds the NULL-SAFE negation of selfTrafficWhere for the
+// import filter. It is NOT `NOT (agent = ?)`: under SQL three-valued logic a NULL
+// agent makes `agent = ?` NULL and `NOT NULL` NULL (falsy), which would SILENTLY
+// DROP every genuine user session with a NULL agent — a permanent data-capture loss
+// on the first full backfill (pre-agent-column sessions carry NULL after ADD
+// COLUMN). SQLite's `IS NOT` compares NULL-safely, so a NULL agent correctly counts
+// as "not witness's own" and is imported. Same column choice as selfTrafficWhere,
+// so read/delete stay in agreement on the authoritative column.
+func selfTrafficExclude(hasAgent bool) (clause string, args []any) {
+	if hasAgent {
+		return `agent IS NOT ?`, []any{MarkerName}
+	}
+	return `title IS NOT ?`, []any{MarkerName}
 }
 
 // sessionHasAgentColumn reports whether the OpenCode session table has an `agent`

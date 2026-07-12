@@ -131,14 +131,14 @@ func sqliteURI(path string) string {
 }
 
 func (im *Importer) sessions(ctx context.Context, db *sql.DB, ids []string) ([]sessionRow, error) {
-	// Exclude witness's OWN distill sessions by NEGATING the shared self-traffic
-	// predicate (the same one cleanup DELETEs by), so the read and delete sides can
-	// never disagree. Agent-authoritative: this fixes the old title-only filter,
-	// which OpenCode's auto-titler could defeat by renaming a witness-distill
-	// session — letting witness's own lens-prompt + analysis get ingested as a user
-	// session. Older schemas with no agent column fall back to the title match.
-	self, selfArgs := selfTrafficWhere(sessionHasAgentColumn(ctx, db))
-	notSelf := `NOT (` + self + `)`
+	// Exclude witness's OWN distill sessions via the NULL-safe negation of the shared
+	// self-traffic predicate (same authoritative column cleanup DELETEs by, so read
+	// and delete never disagree). Agent-authoritative: fixes the old title-only
+	// filter that OpenCode's auto-titler could defeat by renaming a witness-distill
+	// session. selfTrafficExclude uses `IS NOT` (not `NOT (...=...)`) so a NULL agent
+	// — every pre-agent-column user session after ADD COLUMN — is correctly kept, not
+	// silently dropped by SQL three-valued logic. Older schemas fall back to title.
+	notSelf, selfArgs := selfTrafficExclude(sessionHasAgentColumn(ctx, db))
 
 	const cols = `SELECT id, directory, title, time_created, time_updated FROM session`
 	if len(ids) > 0 {
