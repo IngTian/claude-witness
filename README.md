@@ -1,6 +1,7 @@
 # witness — Let Claude Code and OpenCode witness your growth.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/@witness-ai/opencode?logo=npm&label=%40witness-ai%2Fopencode)](https://www.npmjs.com/package/@witness-ai/opencode)
 ![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
 ![Single binary](https://img.shields.io/badge/single%20binary-CGO__ENABLED%3D0-informational)
 ![Runtimes](https://img.shields.io/badge/runtimes-Claude%20Code%20%C2%B7%20OpenCode-8A2BE2)
