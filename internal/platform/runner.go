@@ -31,6 +31,14 @@ type Runner interface {
 	// InvocationHint is a short human string naming how this engine runs, for
 	// doctor/diagnostics (e.g. "claude -p" / "opencode serve").
 	InvocationHint() string
+	// ConcurrentRunSafe reports whether it is safe for the engine to call Run
+	// concurrently (several sessions mining at once) against this runner. This is a
+	// platform FACT (mechanism), NOT a policy: the engine owns the pool size and the
+	// ceiling; the platform only states whether overlap is safe at all. Claude is
+	// true — each Run is an independent `claude -p` process sharing nothing. OpenCode
+	// is false today because Run holds a whole-request mutex; a benchmarked follow-up
+	// narrows that mutex and flips this to true (issue #22).
+	ConcurrentRunSafe() bool
 }
 
 // RunnerProvider is the Platform capability that builds this platform's Runner.

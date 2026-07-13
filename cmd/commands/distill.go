@@ -20,18 +20,23 @@ func newDistillCmd() *cobra.Command {
 	var quiet bool
 	var since string
 	var until string
+	var all bool
 	start := &cobra.Command{
 		Use:   "start",
-		Short: "Kick the worker in the background.",
-		Long:  "Kick the distillation worker in the background. Optional bounds select pending sessions by their latest raw timestamp; values accept RFC3339, YYYY-MM-DD (UTC), or an age such as 7d or 24h. If another worker already holds the lock, the new process exits and queued work remains durable on disk.",
+		Short: "Kick the worker in the background (or run a foreground backfill with --all).",
+		Long:  "Kick the distillation worker in the background. Optional bounds select pending sessions by their latest raw timestamp; values accept RFC3339, YYYY-MM-DD (UTC), or an age such as 7d or 24h. If another worker already holds the lock, the new process exits and queued work remains durable on disk.\n\nWith --all, run the whole backlog in the FOREGROUND instead: this process drains every pending session (mining in parallel), loads the embedding model once, and blocks until done — the day-one \"distill my whole history\" path. --all cannot be combined with --since/--until.",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if all {
+				return cmdDistillBackfill(quiet, since, until)
+			}
 			return cmdDistillStart(quiet, since, until)
 		},
 	}
 	start.Flags().BoolVar(&quiet, "quiet", false, "suppress human-readable status output")
 	start.Flags().StringVar(&since, "since", "", "latest session update at or after this time (for example 7d or 2026-07-01)")
 	start.Flags().StringVar(&until, "until", "", "latest session update at or before this time")
+	start.Flags().BoolVar(&all, "all", false, "drain the entire backlog in the foreground (blocks until done); the day-one backfill path")
 	distillCmd.AddCommand(start)
 	var statusJSON bool
 	statusCmd := &cobra.Command{
@@ -83,6 +88,58 @@ func cmdDistillStart(quiet bool, sinceValue, untilValue string) error {
 	spawnDetached(args...)
 	if !quiet {
 		fmt.Println("distill worker kicked in the background; run `witness distill status` to watch progress")
+	}
+	return nil
+}
+
+// cmdDistillBackfill runs the whole pending backlog in the FOREGROUND (blocking),
+// as opposed to cmdDistillStart's detached spawn. This is the day-one "distill my
+// whole history" path: the embedder loads once for this process, the drain mines
+// in parallel and re-checks until empty, and the exit code reflects success. It is
+// still single-flight — if a background worker already holds the lock this no-ops
+// with a message rather than running a second concurrent drain.
+//
+// --all is deliberately incompatible with --since/--until: a bounded backfill is
+// just `distill start --since ...` (which the background path already supports);
+// "all" means all.
+//
+// Contract (issue #22 review #2): a foreground backfill MUST NOT report success
+// when the backlog was not actually drained. runWorkerInRange swallows an
+// embedder-load failure and per-session mine/commit failures (they log or back off
+// rather than propagate), so a nil error alone does NOT mean "done". We therefore
+// inspect the END STATE after the drain and fail (nonzero exit) if any pending or
+// backed-off work remains — so automation can detect an incomplete migration
+// regardless of which internal layer failed.
+func cmdDistillBackfill(quiet bool, sinceValue, untilValue string) error {
+	if strings.TrimSpace(sinceValue) != "" || strings.TrimSpace(untilValue) != "" {
+		return fmt.Errorf("--all drains the entire backlog and cannot be combined with --since/--until")
+	}
+	if !quiet {
+		fmt.Println("distilling the full backlog in the foreground; this may take a while — run `witness distill status` in another shell to watch")
+	}
+	ran, err := runWorker(false)
+	if err != nil {
+		return err
+	}
+	if !ran {
+		fmt.Println("another distillation worker is already running; it is draining the backlog — nothing to do")
+		return nil
+	}
+
+	// Verify the end state: nothing should be pending or backed off after a full
+	// foreground drain. If work remains, mining did not complete (missing model,
+	// provider outage, or commit error) — surface it as a failure, not "complete".
+	st, err := store.Open()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	stats := st.Stats()
+	if remaining := stats.Pending + stats.BackedOff; remaining > 0 {
+		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log; a missing embedding model or provider failure is the usual cause)", stats.Pending, stats.BackedOff)
+	}
+	if !quiet {
+		fmt.Println("backfill complete")
 	}
 	return nil
 }
@@ -319,7 +376,20 @@ func isWitnessWorkerProcess(pid int) bool {
 		return false
 	}
 	cmd := strings.TrimSpace(string(out))
-	return strings.Contains(cmd, "witness") && strings.Contains(cmd, " worker")
+	if !strings.Contains(cmd, "witness") {
+		return false
+	}
+	// Match the `worker` subcommand but NOT its `worker-wakeup` sibling — a bare
+	// `strings.Contains(cmd, " worker")` also matches "worker-wakeup", which would
+	// make a liveness check treat a transient wakeup process as the worker (issue
+	// #24). Accept `worker` only as a whole token: end of string, or followed by a
+	// space (a flag/arg), never `worker-…`.
+	for _, field := range strings.Fields(cmd) {
+		if field == "worker" {
+			return true
+		}
+	}
+	return false
 }
 
 func terminateWorker(pid string) error {
