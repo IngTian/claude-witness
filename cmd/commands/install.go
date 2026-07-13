@@ -123,15 +123,17 @@ var witnessHookTokens = map[string]bool{"session-start": true, "capture": true, 
 // re-install/uninstall can find and replace them idempotently. It must recognize
 // BOTH invocation forms, else a re-install (or a shell<->exec migration) would
 // fail to dedupe and orphan duplicate hooks:
-//   - shell form (Unix): command contains the shim basename "witness.sh".
+//   - shell form (Unix): the command's FIRST token basename is exactly "witness.sh"
+//     AND its LAST token is one of our subcommand tokens.
 //   - exec form (Windows): command basename is the witness binary AND the first
 //     arg is one of our own subcommand tokens.
 //
-// The exec-form match is intentionally narrow: matching a bare "witness" basename
-// alone would strip a user's UNRELATED hook that happens to invoke a different
-// tool named witness (e.g. the testifysec supply-chain CLI) with args — a foreign
-// hook we are contractually required to preserve. Requiring args[0] to be one of
-// OUR tokens keys the match to what witnessHookSpecs actually writes.
+// Both matches are intentionally narrow (issue #49 I3/I4): matching a bare "witness"
+// basename — or a naked `strings.Contains(c, "witness.sh")` substring — would strip
+// a user's UNRELATED hook that merely CONTAINS the string (e.g. "/opt/notwitness.sh
+// deploy", "/opt/witness.showcase/run.sh", or the testifysec "witness" CLI). Those
+// are foreign hooks we are contractually required to preserve. Keying on an exact
+// basename PLUS one of OUR tokens matches only what witnessHookSpecs actually writes.
 func isWitnessEntry(e any) bool {
 	m, ok := e.(map[string]any)
 	if !ok {
@@ -141,7 +143,7 @@ func isWitnessEntry(e any) bool {
 	for _, h := range hs {
 		hm, _ := h.(map[string]any)
 		c, _ := hm["command"].(string)
-		if strings.Contains(c, "witness.sh") {
+		if isWitnessShimCommand(c) {
 			return true // shell-form shim
 		}
 		if isWitnessBinary(c) && firstArgIsWitnessToken(hm["args"]) {
@@ -149,6 +151,30 @@ func isWitnessEntry(e any) bool {
 		}
 	}
 	return false
+}
+
+// isWitnessShimCommand reports whether a shell-form command string is one WE wrote:
+// `'<path>/witness.sh' <token>`. It requires the first whitespace-separated token's
+// basename to equal exactly "witness.sh" AND the last token to be one of our
+// subcommand tokens — so a foreign command that merely contains the substring
+// "witness.sh" (e.g. "notwitness.sh", "witness.sha256") is NOT matched. Mirrors the
+// exec-form basename-exact + token discipline (issue #49 I3).
+func isWitnessShimCommand(cmd string) bool {
+	fields := strings.Fields(cmd)
+	if len(fields) < 2 {
+		return false
+	}
+	// The shim path is shell-quoted by shellQuote (single quotes); strip them so the
+	// basename check sees the real path. A bare unquoted path also works.
+	first := strings.Trim(fields[0], "'\"")
+	base := first
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	if !strings.EqualFold(base, "witness.sh") {
+		return false
+	}
+	return witnessHookTokens[fields[len(fields)-1]]
 }
 
 // isWitnessBinary reports whether an exec-form command path's basename is the

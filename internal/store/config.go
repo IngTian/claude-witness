@@ -77,8 +77,19 @@ func (s *Store) LoadConfig() Config {
 		case "distill_model":
 			c.DistillModel = v
 		case "review_every":
+			// Clamp <=0 back to the default rather than accepting it verbatim (issue
+			// #49 I1). ReviewDue tests `SessionsSinceReview() >= ReviewEvery`, so a 0
+			// or negative value would make a review ALWAYS due — firing the reviewer +
+			// full L4 regen on essentially every session-end, the opposite of the
+			// "0 = off" a user might infer from review_poignancy. Mirrors the
+			// mine_concurrency guard below. (To disable count-based review, raise the
+			// number; the poignancy trigger is the one with off-via-0 semantics.)
 			if n, err := strconv.Atoi(v); err == nil {
-				c.ReviewEvery = n
+				if n <= 0 {
+					c.ReviewEvery = DefaultConfig().ReviewEvery
+				} else {
+					c.ReviewEvery = n
+				}
 			}
 		case "review_poignancy":
 			if n, err := strconv.Atoi(v); err == nil {

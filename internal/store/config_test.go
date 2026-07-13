@@ -112,6 +112,46 @@ func TestOpenIsIdempotentOnTemplate(t *testing.T) {
 	}
 }
 
+// TestReviewEveryClampsNonPositive is the issue #49 I1 regression: review_every <= 0
+// must clamp to the default, not be accepted verbatim. A verbatim 0 makes ReviewDue
+// (SessionsSinceReview() >= ReviewEvery) always true, firing the reviewer on every
+// session-end. Mirrors the mine_concurrency clamp.
+func TestReviewEveryClampsNonPositive(t *testing.T) {
+	for _, val := range []string{"0", "-1"} {
+		t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+		st, err := Open()
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		if err := os.WriteFile(st.ConfigPath(), []byte("review_every = "+val+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c := st.LoadConfig()
+		if c.ReviewEvery != DefaultConfig().ReviewEvery {
+			t.Errorf("review_every=%s should clamp to default %d, got %d", val, DefaultConfig().ReviewEvery, c.ReviewEvery)
+		}
+		// And ReviewDue must NOT be trivially/always true on a fresh archive.
+		if c.ReviewEvery <= 0 {
+			t.Errorf("review_every=%s left a non-positive value %d", val, c.ReviewEvery)
+		}
+		st.Close()
+	}
+
+	// A positive value is still honored verbatim.
+	t.Setenv("WITNESS_HOME", filepath.Join(t.TempDir(), "witness"))
+	st, err := Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := os.WriteFile(st.ConfigPath(), []byte("review_every = 12\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c := st.LoadConfig(); c.ReviewEvery != 12 {
+		t.Errorf("positive review_every should be honored, got %d", c.ReviewEvery)
+	}
+}
+
 // --- SetRunner: install wires runner to match the integration. ----------------
 // tempStore's Open already ensures a template; SetRunner tests overwrite it with
 // a controlled fixture to test the read-modify-write in isolation.
