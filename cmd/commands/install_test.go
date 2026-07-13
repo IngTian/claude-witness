@@ -91,6 +91,79 @@ func TestMergePreservesForeignHooksAndSettings(t *testing.T) {
 	}
 }
 
+// TestMergePreservesForeignHooksContainingWitnessShimSubstring is the issue #49 I3
+// regression: a foreign shell hook whose command merely CONTAINS the substring
+// "witness.sh" (e.g. "/opt/notwitness.sh", "/opt/witness.showcase/run.sh") must NOT
+// be misclassified as ours and stripped on install. The old
+// strings.Contains(c, "witness.sh") did exactly that; the basename-exact + trailing-
+// token match must preserve these.
+func TestMergePreservesForeignHooksContainingWitnessShimSubstring(t *testing.T) {
+	foreign := []string{
+		"/opt/tools/notwitness.sh capture",      // basename is notwitness.sh, not witness.sh
+		"'/opt/witness.showcase/run.sh' deploy", // dir contains "witness.s", basename is run.sh
+		"/usr/bin/witness.sha256 verify",        // starts with "witness.sh" but isn't it
+	}
+	in := `{"hooks":{"Stop":[` +
+		`{"hooks":[{"type":"command","command":"/opt/tools/notwitness.sh capture"}]},` +
+		`{"hooks":[{"type":"command","command":"'/opt/witness.showcase/run.sh' deploy"}]},` +
+		`{"hooks":[{"type":"command","command":"/usr/bin/witness.sha256 verify"}]}` +
+		`]}}`
+	out, err := mergeWitnessHooks([]byte(in), shellInvocation("/repo/hooks/witness.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmds := eventCommands(t, out, "Stop")
+	for _, want := range foreign {
+		found := false
+		for _, c := range cmds {
+			if c == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("foreign hook %q was stripped; must be preserved. got %v", want, cmds)
+		}
+	}
+	// And our own hook is still added exactly once. Count via the precise matcher,
+	// NOT countWitness's loose substring (which would also count the 3 foreign
+	// "witness.s*" commands and is exactly the bug under test).
+	ours := 0
+	for _, c := range cmds {
+		if isWitnessShimCommand(c) {
+			ours++
+		}
+	}
+	if ours != 1 {
+		t.Errorf("our own witness.sh hook should be present exactly once, got %d in %v", ours, cmds)
+	}
+}
+
+// TestIsWitnessShimCommandMatchesOnlyOurs directly exercises the shell-form matcher.
+func TestIsWitnessShimCommandMatchesOnlyOurs(t *testing.T) {
+	ours := []string{
+		"'/repo/hooks/witness.sh' capture",
+		"'/a/b/witness.sh' session-start",
+		"/plain/path/witness.sh session-end", // unquoted also matches
+	}
+	for _, c := range ours {
+		if !isWitnessShimCommand(c) {
+			t.Errorf("should match our shim command: %q", c)
+		}
+	}
+	foreign := []string{
+		"/opt/tools/notwitness.sh capture",      // wrong basename
+		"'/opt/witness.showcase/run.sh' deploy", // wrong basename + non-token last
+		"/usr/bin/witness.sha256 verify",        // wrong basename
+		"'/repo/hooks/witness.sh' deploy",       // right basename, but "deploy" is not our token
+		"'/repo/hooks/witness.sh'",              // no token at all
+	}
+	for _, c := range foreign {
+		if isWitnessShimCommand(c) {
+			t.Errorf("must NOT match foreign/incomplete command: %q", c)
+		}
+	}
+}
+
 // --- Windows exec-form hooks (guarded on any OS since the merge logic is
 // platform-independent; only resolveClaudeInstall is GOOS-split) --------------
 

@@ -49,6 +49,11 @@ assets/e5-small/*.onnx_data
 *.prof
 # Release archives (produced by `make package-windows`, attached to releases)
 *.zip
+# Release staging dir (raw cross-compiled binaries + SHA256SUMS produced by the
+# release build, attached to the GitHub Release — never committed). Anchored to
+# root; the *.zip rule above already covers the Windows zips here, but the raw
+# ELF/Mach-O binaries + SHA256SUMS.txt are otherwise stageable (issue #49 I6).
+/dist/
 
 # Generated npm publish payload. Produced by `make npm-opencode-package`.
 /npm/opencode/dist/
