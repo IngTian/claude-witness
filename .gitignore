@@ -41,9 +41,12 @@ assets/e5-small/*.onnx_data
 # Compiled binaries (anchor to root so cmd/witness/ source is NOT ignored)
 /bin/
 /witness
+/witness-*
 /witness.exe
 *.test
 *.exe
+*.out
+*.prof
 # Release archives (produced by `make package-windows`, attached to releases)
 *.zip
 
@@ -51,4 +54,6 @@ assets/e5-small/*.onnx_data
 /npm/opencode/dist/
 /npm/opencode/prompts/
 /npm/opencode/assets/
+/npm/opencode/node_modules/
+/npm/opencode/*.tgz
 /npm/platform/*/bin/
