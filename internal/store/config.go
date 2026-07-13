@@ -257,7 +257,9 @@ func (s *Store) EnsureConfigFile() error {
 triage_model  = ""
 distill_model = ""
 
-# Run the reviewer after this many distilled sessions since the last review...
+# Run the reviewer after this many distilled sessions since the last review.
+# Must be >= 1 (a value <= 0 is treated as the default, 5 — it does NOT disable
+# review; to review less often, raise this number).
 review_every = 5
 # ...or once accumulated observation poignancy crosses this threshold (0 = off).
 review_poignancy = 30
