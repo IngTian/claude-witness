@@ -138,19 +138,6 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	}
 	ctx := context.Background()
 
-	// Embedder is heavy (~448MB); load it lazily and once per short-lived worker
-	// process, only if a session actually needs mining. There is deliberately no
-	// resident embedding service: when the queue drains, the process exits and the
-	// model memory is released.
-	var emb *embed.Embedder
-	var embErr error
-	getEmb := func() (*embed.Embedder, error) {
-		if emb == nil && embErr == nil {
-			emb, embErr = embed.New()
-		}
-		return emb, embErr
-	}
-
 	pending := func() []string {
 		p, _ := st.PendingSessionsUpdatedBetween(timeRange.since, timeRange.until)
 		return p
@@ -163,7 +150,8 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		slog.Error("resolve runner", "err", err)
 		return true, err
 	}
-	if len(pending()) > 0 || st.ReviewDue(cfg) {
+	hasPending := len(pending()) > 0
+	if hasPending || st.ReviewDue(cfg) {
 		if err := runner.Open(ctx); err != nil {
 			slog.Error("open runner", "runner", cfg.Runner, "err", err)
 			return true, err
@@ -172,22 +160,33 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	defer runner.Close()
 	runFn := distill.RunnerMine(runner)
 	sessionBudget := workerSessionBudget(cfg, auto)
-	processedSessions := drainQueueLimit(pending, func(session string) {
-		if st.MetaString("worker_stop_requested") == "1" {
-			return
-		}
-		_ = st.SetMetaString("worker_current", session)
-		_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
-		e, err := getEmb()
+
+	// Drain pending sessions. The embedder is heavy (~448MB) and loaded once per
+	// short-lived worker process ONLY when there is mining to do; it is shared
+	// across the parallel miners (its own mutex serializes concurrent Embed calls,
+	// which is cheap next to the LLM latency). Mining runs up to `conc` sessions at
+	// once (MAP); commits are serial (REDUCE) — see distill.Worker.Drain.
+	var processedSessions int
+	stopRequested := func() bool { return st.MetaString("worker_stop_requested") == "1" }
+	if hasPending && !stopRequested() {
+		emb, err := embed.New()
 		if err != nil {
-			slog.Error("embedder", "err", err)
-			return
+			slog.Error("embedder", "err", err) // can't mine this run; fall through to review
+		} else {
+			conc := distill.EffectiveConcurrency(cfg.MineConcurrency, runner.ConcurrentRunSafe())
+			w := &distill.Worker{Store: st, Embedder: emb, Lenses: lenses, Config: cfg, Run: runFn}
+			processedSessions = w.Drain(ctx, distill.DrainOpts{
+				Conc:    conc,
+				Pending: pending,
+				Max:     sessionBudget,
+				Stop:    stopRequested,
+				OnCommit: func(session string) {
+					_ = st.SetMetaString("worker_current", session)
+					_ = st.SetMetaString("worker_heartbeat", time.Now().UTC().Format(time.RFC3339))
+				},
+			})
 		}
-		w := &distill.Worker{Store: st, Embedder: e, Lenses: lenses, Config: cfg, Run: runFn}
-		if err := w.Process(ctx, session); err != nil {
-			slog.Error("process session", "session", session, "err", err)
-		}
-	}, sessionBudget)
+	}
 	remainingPending := len(pending())
 	if workerBudgetReached(auto, sessionBudget, processedSessions, remainingPending) {
 		next, _ := autoDistillNextAt(st, cfg.AutoDistillIntervalMinutes, time.Now())

@@ -76,14 +76,47 @@ type Worker struct {
 	Run      MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
 }
 
-// Process runs the fast-path pass for a session, distilling only the records that
-// arrived since the last run (the watermark). This makes it safe on RESUMED
-// sessions: Claude Code reuses the session id and appends new turns to the same
-// log, so a binary "done" flag would skip them — the delta watermark mines them.
+// SessionMining is the result of the MAP half of a distillation pass: everything
+// mined for one session that does NOT touch the store's write path or depend on
+// any other session. It is produced by MineSession (safe to run for many sessions
+// concurrently) and consumed by CommitMining (serial, the sole L1 writer). The
+// split is what lets the engine parallelize the expensive LLM mining while keeping
+// dedup + writes single-threaded and correct (issue #22).
+type SessionMining struct {
+	Session         string
+	Total           int    // len(raw) at read time — the watermark to advance to on success
+	SessionTS       string // recency anchor for observations lacking their own ts
+	StagedThroughID int64  // how far staged was drained, to clear exactly those rows on success
+	Active          []store.Observation
+	Mined           []store.Observation
+	MineFailed      bool // a transport error hit at least one lens — commit must back off, not write
+	NothingToDo     bool // no new turns and nothing staged — commit just advances the watermark
+}
+
+// Process runs a full fast-path pass for one session: MineSession then CommitMining
+// against a fresh store snapshot. It is the serial entry point kept for the
+// single-session callers and every existing test. The parallel drain calls
+// MineSession (concurrently) and CommitMining (serially) directly instead.
 func (w *Worker) Process(ctx context.Context, session string) error {
+	m, err := w.MineSession(ctx, session)
+	if err != nil {
+		return err
+	}
+	existing, _ := w.Store.ReadObservations("")
+	return w.CommitMining(m, &existing)
+}
+
+// MineSession is the MAP half: read the delta, drain staged, and run every lens's
+// extract prompt (the LLM calls — the expensive, parallelizable part). It performs
+// NO L1 writes and reads NO cross-session state, so the engine may call it for many
+// sessions concurrently. Embeddings for active obs are computed here too (the
+// embedder guards itself with a mutex, so concurrent callers serialize on it
+// briefly — cheap relative to the LLM call). All dedup-against-corpus and writes
+// happen later in CommitMining.
+func (w *Worker) MineSession(ctx context.Context, session string) (*SessionMining, error) {
 	raw, err := w.Store.ReadRaw(session)
 	if err != nil {
-		return fmt.Errorf("read L0: %w", err)
+		return nil, fmt.Errorf("read L0: %w", err)
 	}
 	total := len(raw)
 	done := w.Store.DistilledCount(session) // records already distilled
@@ -94,24 +127,32 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 		newRecs = raw[done:]
 	}
 
+	m := &SessionMining{Session: session, Total: total, StagedThroughID: 0}
+	if total > 0 {
+		m.SessionTS = raw[total-1].TS
+	}
+
 	// 1. Active observations (staged in-session via MCP) — authoritative. We drain
-	// them and remember how far (stagedThroughID) so we can delete exactly those
-	// rows after a successful commit (step 7); on failure they stay for retry.
+	// them and remember how far (StagedThroughID) so CommitMining can delete exactly
+	// those rows after a successful commit; on failure they stay for retry.
 	active, stagedThroughID, _ := w.Store.DrainStaged(session)
 	for i := range active {
 		active[i].Source = "active"
 	}
+	m.Active = active
+	m.StagedThroughID = stagedThroughID
 
-	// Nothing new to mine and nothing staged → just advance the watermark.
+	// Nothing new to mine and nothing staged → commit just advances the watermark.
 	if len(newRecs) == 0 && len(active) == 0 {
-		return w.Store.MarkDistilled(session, total)
+		m.NothingToDo = true
+		return m, nil
 	}
 
 	// 2. Mine ONLY the delta. Each lens runs its extract prompt over the new turns.
 	//
 	// ALL-OR-NOTHING per delta (deliberate tradeoff): if ANY lens hits a transport
-	// error, we abandon the whole pass below (mineFailed) and re-mine every lens on
-	// the next attempt. A healthy sibling lens's observations from THIS round are
+	// error, we abandon the whole pass (MineFailed) and re-mine every lens on the
+	// next attempt. A healthy sibling lens's observations from THIS round are
 	// discarded — but never lost, since the delta stays pending and is re-mined in
 	// full once the failure clears. We accept the wasted work because transport
 	// errors almost always hit all lenses at once (same `claude -p` / auth), so a
@@ -120,8 +161,6 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 	// genuinely poison session is bounded: it retries on backoff (capped 6h, never
 	// dropped) and shows up in `witness doctor` as BackedOff. If single-lens
 	// failures ever become common, move to a per-(session,lens) watermark here.
-	var mined []store.Observation
-	mineFailed := false
 	if len(newRecs) > 0 {
 		for _, transcript := range distillInputs(w.Store, session, newRecs) {
 			for _, ln := range w.Lenses {
@@ -132,51 +171,84 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 					// advancing past it (which would lose those turns). (A mere parse-miss
 					// is NOT an error — mine() returns it as a quiet session.)
 					slog.Error("mine failed", "session", session, "lens", ln.Name, "err", err)
-					mineFailed = true
+					m.MineFailed = true
 					continue
 				}
-				mined = append(mined, obs...)
+				m.Mined = append(m.Mined, obs...)
 			}
 		}
 	}
 
-	// 3. Embed active so dedup + later recall work.
-	for i := range active {
-		if len(active[i].Embedding) == 0 {
-			if v, err := w.Embedder.Embed(active[i].Observation); err == nil {
-				active[i].Embedding = v
+	// 3. Embed active so dedup + later recall work. Done in the map phase so the
+	// serial commit stays cheap; the embedder's own mutex makes this concurrency-safe.
+	for i := range m.Active {
+		if len(m.Active[i].Embedding) == 0 {
+			if v, err := w.Embedder.Embed(m.Active[i].Observation); err == nil {
+				m.Active[i].Embedding = v
 			}
 		}
 	}
-	existing, _ := w.Store.ReadObservations("")
-
-	// 4. Combine: active verbatim; mined minus near-duplicates (of active or stored).
-	combined := append([]store.Observation{}, active...)
-	for i := range mined {
-		v, err := w.Embedder.Embed(mined[i].Observation)
+	// Embed mined too, here in the map phase (dedup in commit needs the vectors).
+	// A mined obs whose embedding fails is dropped now — same as before, where the
+	// combine loop skipped it on Embed error.
+	kept := m.Mined[:0]
+	for i := range m.Mined {
+		v, err := w.Embedder.Embed(m.Mined[i].Observation)
 		if err != nil {
 			continue
 		}
-		mined[i].Embedding = v
-		if vector.NearestScore(active, v, mined[i].Lens) >= dedupThreshold {
-			continue
-		}
-		if vector.NearestScore(existing, v, mined[i].Lens) >= dedupThreshold {
-			continue
-		}
-		combined = append(combined, mined[i])
+		m.Mined[i].Embedding = v
+		kept = append(kept, m.Mined[i])
+	}
+	m.Mined = kept
+	return m, nil
+}
+
+// CommitMining is the REDUCE half: given one session's mining result and a pointer
+// to the RUNNING corpus snapshot, dedup the mined observations, write L1, advance
+// the watermark, and clear staged rows. It is the SOLE L1 writer and MUST run
+// serially. `existing` is threaded by pointer and APPENDED with each session's
+// newly-written observations, so a later session in the same drain dedups against
+// an earlier one's writes — strictly better than a per-session fresh snapshot, and
+// what makes parallel mining safe without a cross-session dedup gap.
+func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) error {
+	if m.NothingToDo {
+		return w.Store.MarkDistilled(m.Session, m.Total)
 	}
 
-	// 5. Drop anything whose exact obsID is already in L1. This makes the whole pass
+	// Failure handling (S1: at-least-once, NEVER-drop). A transport failure leaves
+	// the delta unwritten and the watermark unadvanced, so the raw turns stay
+	// pending. We back the session off so the consumer doesn't hammer it; when the
+	// failure clears, the delta self-heals. (A parse-miss is handled in mine() as a
+	// quiet session, not a failure — so an uneventful session still advances.)
+	if m.MineFailed {
+		n := w.Store.IncRetry(m.Session)
+		_ = w.Store.SetNextAttempt(m.Session, time.Now().Add(backoffDelay(n)))
+		slog.Warn("distill: mining failed; backing off (delta stays pending, never dropped)",
+			"session", m.Session, "attempt", n, "backoff", backoffDelay(n).String())
+		return nil // active obs persist in staging, delta re-mines later
+	}
+	w.Store.ResetRetry(m.Session)
+
+	// Combine: active verbatim; mined minus near-duplicates (of active or of the
+	// running corpus, which includes earlier sessions' writes in THIS drain).
+	combined := append([]store.Observation{}, m.Active...)
+	for i := range m.Mined {
+		if vector.NearestScore(m.Active, m.Mined[i].Embedding, m.Mined[i].Lens) >= dedupThreshold {
+			continue
+		}
+		if vector.NearestScore(*existing, m.Mined[i].Embedding, m.Mined[i].Lens) >= dedupThreshold {
+			continue
+		}
+		combined = append(combined, m.Mined[i])
+	}
+
+	// Drop anything whose exact obsID is already in L1. This makes the pass
 	// idempotent on re-run: re-drained active obs and identical re-mines (after a
 	// crash) are skipped rather than duplicated. `seen` also dedups within the batch.
-	seen := make(map[string]bool, len(existing))
-	for _, o := range existing {
+	seen := make(map[string]bool, len(*existing))
+	for _, o := range *existing {
 		seen[o.ID] = true
-	}
-	sessionTS := ""
-	if total > 0 {
-		sessionTS = raw[total-1].TS // recency anchor for obs lacking their own ts
 	}
 	var toWrite []store.Observation
 	for _, o := range combined {
@@ -185,36 +257,24 @@ func (w *Worker) Process(ctx context.Context, session string) error {
 		}
 		seen[o.ID] = true
 		if o.TS == "" {
-			o.TS = sessionTS
+			o.TS = m.SessionTS
 		}
 		toWrite = append(toWrite, o)
 	}
 
-	// 6. Failure handling (S1: at-least-once, NEVER-drop). A transport failure
-	// (claude -p hiccup / rate limit) leaves the delta unwritten and the watermark
-	// unadvanced, so the raw turns stay pending. We back the session off so the
-	// consumer doesn't hammer it; when the failure clears, the delta self-heals.
-	// (A mere parse-miss is handled in mine() as a quiet session, not a failure —
-	// so a genuinely uneventful session still advances instead of looping forever.)
-	if mineFailed {
-		n := w.Store.IncRetry(session)
-		_ = w.Store.SetNextAttempt(session, time.Now().Add(backoffDelay(n)))
-		slog.Warn("distill: mining failed; backing off (delta stays pending, never dropped)",
-			"session", session, "attempt", n, "backoff", backoffDelay(n).String())
-		return nil // discard toWrite; active obs persist in staging, delta re-mines later
-	}
-	w.Store.ResetRetry(session)
-
-	// 7. Write L1, then advance the watermark (so a crash mid-write re-runs the
-	// delta; obsID dedup keeps that re-run from duplicating), then clear the staged
-	// rows we drained — LAST, so a crash before it just re-drains harmlessly.
+	// Write L1, then advance the watermark (so a crash mid-write re-runs the delta;
+	// obsID dedup keeps that re-run from duplicating), then clear the staged rows we
+	// drained — LAST, so a crash before it just re-drains harmlessly.
 	if err := w.Store.AppendObservations(toWrite); err != nil {
 		return fmt.Errorf("append L1: %w", err)
 	}
-	if err := w.Store.MarkDistilled(session, total); err != nil {
+	if err := w.Store.MarkDistilled(m.Session, m.Total); err != nil {
 		return err
 	}
-	w.Store.ClearStagedThrough(session, stagedThroughID)
+	w.Store.ClearStagedThrough(m.Session, m.StagedThroughID)
+	// Feed the just-written observations into the running snapshot so the next
+	// session's dedup sees them (the cross-session dedup guarantee).
+	*existing = append(*existing, toWrite...)
 	return nil
 }
 

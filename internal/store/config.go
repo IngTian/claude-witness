@@ -21,11 +21,19 @@ type Config struct {
 	AutoDistill                bool   // whether hooks/plugins may start the worker automatically
 	AutoDistillIntervalMinutes int    // minimum wall-clock gap between automatic worker starts
 	AutoDistillSessionBudget   int    // max sessions per automatic worker run (0 = unbounded)
+	MineConcurrency            int    // max sessions mined in parallel per drain; the engine clamps this to GOMAXPROCS and to 1 when the runner is not ConcurrentRunSafe (issue #22). <=0 means DefaultMineConcurrency.
 	// EnabledLenses is the set of registered lens names that run on EVERY session
 	// (alongside the always-on "default" lens). Lenses are global and centrally
 	// registered — not tied to a repo path — so the same lens is shared everywhere.
 	EnabledLenses []string
 }
+
+// DefaultMineConcurrency is the default cap on sessions mined in parallel per
+// drain when mine_concurrency is unset. Chosen for a laptop: the embedder loads
+// once and is shared (~1.5GB), each concurrent `claude -p` adds ~0.35GB, so 4
+// peaks around 2.9GB. The engine additionally clamps to GOMAXPROCS and to 1 for a
+// runner that is not ConcurrentRunSafe.
+const DefaultMineConcurrency = 4
 
 func DefaultConfig() Config {
 	return Config{
@@ -40,6 +48,7 @@ func DefaultConfig() Config {
 		// worker exits after draining the queue so the embed model never stays resident.
 		AutoDistillIntervalMinutes: 10,
 		AutoDistillSessionBudget:   0,
+		MineConcurrency:            DefaultMineConcurrency,
 	}
 }
 
@@ -89,6 +98,16 @@ func (s *Store) LoadConfig() Config {
 		case "auto_distill_session_budget":
 			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 				c.AutoDistillSessionBudget = n
+			}
+		case "mine_concurrency":
+			// <=0 restores the default rather than disabling mining (0 goroutines
+			// would drain nothing); the engine still clamps the effective value.
+			if n, err := strconv.Atoi(v); err == nil {
+				if n <= 0 {
+					c.MineConcurrency = DefaultMineConcurrency
+				} else {
+					c.MineConcurrency = n
+				}
 			}
 		case "lens":
 			// One enabled lens per line: "lens = <name>". Global — runs on every
@@ -245,6 +264,11 @@ review_poignancy = 30
 auto_distill = true
 auto_distill_interval_minutes = 10
 auto_distill_session_budget = 0
+
+# Sessions mined in parallel per drain (backfill speed). The embedder loads once
+# and is shared; each concurrent distillation call adds ~0.35GB. Clamped to the
+# CPU count and to 1 for a runner that can't run concurrently. <=0 = default (4).
+mine_concurrency = 4
 
 # Enabled lenses (one per line). Managed by ` + "`witness lens enable/disable <name>`" + `.
 # lens = math
