@@ -1,4 +1,4 @@
-package distill
+package opencode
 
 import (
 	"context"
@@ -42,7 +42,7 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["title"] != "witness-distill" || body["agent"] != openCodeAgentName {
+			if body["title"] != "witness-distill" || body["agent"] != MarkerName {
 				t.Fatalf("bad session body: %#v", body)
 			}
 			model := body["model"].(map[string]any)
@@ -59,7 +59,7 @@ func TestOpenCodeServerRunCreatesSendsAndDeletesSession(t *testing.T) {
 			if !strings.HasPrefix(body["messageID"].(string), "msg_") {
 				t.Fatalf("messageID not generated: %#v", body["messageID"])
 			}
-			if body["agent"] != openCodeAgentName {
+			if body["agent"] != MarkerName {
 				t.Fatalf("bad agent: %#v", body["agent"])
 			}
 			if system := body["system"].(string); !strings.Contains(system, "EXTRACT") || !strings.Contains(system, "UNTRUSTED") {
@@ -178,11 +178,5 @@ func TestModelHint(t *testing.T) {
 	}
 	if got := modelHint([]string{"openai/gpt-5.5"}); !strings.Contains(got, "openai/gpt-5.5") {
 		t.Fatalf("model hint = %q", got)
-	}
-}
-
-func TestRunWithRejectsUnknownRunner(t *testing.T) {
-	if _, err := RunWith(context.Background(), "bogus", "", "", ""); err == nil {
-		t.Fatalf("unknown runner should fail")
 	}
 }

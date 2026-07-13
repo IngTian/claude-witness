@@ -143,6 +143,31 @@ func (s *Store) ReadMeta(session string) SessionMeta {
 	return m
 }
 
+// SetSessionPlatform records which platform OWNS a session (the per-session axis,
+// issue #21) — distinct from the global distillation runner. Upsert, since a CC
+// session has no session_meta row until now: INSERT the row if absent, else set
+// only the platform column (leaving cwd/started untouched). Best-effort at the
+// capture/import boundary; ForSession falls back to the id prefix when unset, so a
+// missed write degrades to the same answer rather than misclassifying.
+func (s *Store) SetSessionPlatform(session, platform string) {
+	if session == "" || platform == "" {
+		return
+	}
+	_, _ = s.db.Exec(
+		`INSERT INTO session_meta(session, platform) VALUES (?, ?)
+		 ON CONFLICT(session) DO UPDATE SET platform = excluded.platform`,
+		session, platform)
+}
+
+// SessionPlatform returns the recorded owning platform for a session, or "" if no
+// row exists or it was never classified. ForSession layers the prefix/default rule
+// on top of this — this method only reports the persisted column.
+func (s *Store) SessionPlatform(session string) string {
+	var p string
+	_ = s.db.QueryRow(`SELECT platform FROM session_meta WHERE session = ?`, session).Scan(&p)
+	return p
+}
+
 // --- active observation staging (in-session via MCP) ------------------------
 
 // StageObservation records an active (in-session) observation with no quantity
@@ -298,9 +323,24 @@ func (s *Store) NextBackoffAttempt(now time.Time) (time.Time, bool) {
 // Keying on the watermark (not a mere marker) means a RESUMED session whose log
 // gains new turns is picked up again.
 func (s *Store) PendingSessions() ([]string, error) {
+	return s.PendingSessionsUpdatedBetween(time.Time{}, time.Time{})
+}
+
+// PendingSessionsUpdatedBetween applies an optional inclusive range to each
+// session's most recent raw timestamp. Zero bounds are open. Sessions with no
+// timestamp remain eligible only when no range is requested.
+func (s *Store) PendingSessionsUpdatedBetween(since, until time.Time) ([]string, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	sinceValue := ""
+	if !since.IsZero() {
+		sinceValue = since.UTC().Format(time.RFC3339Nano)
+	}
+	untilValue := ""
+	if !until.IsZero() {
+		untilValue = until.UTC().Format(time.RFC3339Nano)
+	}
 	rows, err := s.db.Query(
-		`SELECT session FROM (
+		`WITH candidates AS (
 		   SELECT l.session
 		     FROM (SELECT session, COUNT(*) AS c FROM raw GROUP BY session) l
 		     LEFT JOIN progress p ON p.session = l.session
@@ -312,7 +352,17 @@ func (s *Store) PendingSessions() ([]string, error) {
 		     LEFT JOIN progress p ON p.session = st.session
 		    WHERE COALESCE(st.session, '') != ''
 		      AND (COALESCE(p.next_attempt, '') = '' OR COALESCE(p.next_attempt, '') <= ?)
-		  ) ORDER BY session`, now, now)
+		  ), updates AS (
+		   SELECT session, MAX(julianday(ts)) AS updated_at
+		     FROM raw
+		    GROUP BY session
+		  )
+		 SELECT c.session
+		   FROM candidates c
+		   LEFT JOIN updates u ON u.session = c.session
+		  WHERE (? = '' OR u.updated_at >= julianday(?))
+		    AND (? = '' OR u.updated_at <= julianday(?))
+		  ORDER BY c.session`, now, now, sinceValue, sinceValue, untilValue, untilValue)
 	if err != nil {
 		return nil, err
 	}
@@ -374,11 +424,12 @@ func (s *Store) WorkerLock() (unlock func(), ok bool) {
 	return s.lockFile(".worker.lock")
 }
 
-// OpenCodeSyncLock serializes imports from OpenCode's session database. The
-// importer is watermark-based, but concurrent importers can otherwise read the
-// same count and append the same text rows twice.
-func (s *Store) OpenCodeSyncLock() (unlock func(), ok bool) {
-	return s.lockFile(".opencode-sync.lock")
+// ImportLock serializes a platform's import from its external source. The importer
+// is watermark-based, but concurrent importers can otherwise read the same count
+// and append the same text rows twice. name identifies the source (the platform
+// owns it, so the store stays platform-agnostic) and keys a per-source lock file.
+func (s *Store) ImportLock(name string) (unlock func(), ok bool) {
+	return s.lockFile("." + name + "-sync.lock")
 }
 
 func (s *Store) lockFile(name string) (unlock func(), ok bool) {

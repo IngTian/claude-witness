@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/IngTian/witness/internal/distill"
 	"github.com/IngTian/witness/internal/embed"
+	"github.com/IngTian/witness/internal/platform"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
@@ -33,20 +33,35 @@ func cmdDoctor(asJSON bool) error {
 	}
 	defer st.Close()
 	cfg := st.LoadConfig()
+	// Report the EFFECTIVE runner, resolving the WITNESS_RUNNER env fallback so an
+	// npm OpenCode user (who never bound a runner via install) sees "opencode",
+	// not the misleading template default "claude". Matches what the worker uses.
+	cfg.Runner = st.ResolveRunner(cfg)
 	stat := st.Stats()
 
-	// Don't short-circuit on a bad OpenCode model: the embedder check below is
-	// doctor's core purpose (verify the model loads and EN/ZH retrieval works),
-	// and it must run even when distillation is misconfigured. Remember the
+	// Resolve the runner once; doctor asks IT how it runs and whether its models are
+	// valid — no branching on the runner name. runnerCmd is the runner's own
+	// invocation hint (e.g. "claude -p" / "opencode serve"); modelStatus is the
+	// result of the runner's model check (Claude's is a no-op → "OK", nothing to
+	// validate and no cost; OpenCode shells to `opencode models`).
+	//
+	// Don't short-circuit on a bad model: the embedder check below is doctor's core
+	// purpose and must run even when distillation is misconfigured. Remember the
 	// failure and surface it as the exit code at the very end.
 	var deferredErr error
-	opencodeModels := "skipped"
-	if strings.EqualFold(cfg.Runner, "opencode") {
-		if err := distill.ValidateOpenCodeModels(context.Background(), cfg.TriageModel, cfg.DistillModel); err != nil {
-			opencodeModels = "INVALID: " + err.Error()
+	runnerCmd := "unknown"
+	modelStatus := "unknown"
+	runner, rerr := platform.RunnerFor(st, cfg)
+	if rerr != nil {
+		modelStatus = "INVALID: " + rerr.Error()
+		deferredErr = rerr
+	} else {
+		runnerCmd = runner.InvocationHint()
+		if err := runner.ValidateModels(context.Background(), cfg.TriageModel, cfg.DistillModel); err != nil {
+			modelStatus = "INVALID: " + err.Error()
 			deferredErr = err
 		} else {
-			opencodeModels = "OK"
+			modelStatus = "OK"
 		}
 	}
 
@@ -82,13 +97,16 @@ func cmdDoctor(asJSON bool) error {
 		out := doctorJSON{
 			DataRoot: st.Root,
 			Config: doctorConfigJSON{
-				Runner:          cfg.Runner,
-				TriageModel:     cfg.TriageModel,
-				DistillModel:    cfg.DistillModel,
-				ReviewEvery:     cfg.ReviewEvery,
-				ReviewPoignancy: cfg.ReviewPoignancy,
+				Runner:                     cfg.Runner,
+				TriageModel:                cfg.TriageModel,
+				DistillModel:               cfg.DistillModel,
+				ReviewEvery:                cfg.ReviewEvery,
+				ReviewPoignancy:            cfg.ReviewPoignancy,
+				AutoDistill:                cfg.AutoDistill,
+				AutoDistillIntervalMinutes: cfg.AutoDistillIntervalMinutes,
+				AutoDistillSessionBudget:   cfg.AutoDistillSessionBudget,
 			},
-			OpenCodeModels: opencodeModels,
+			ModelCheck: modelStatus,
 			Archive: doctorArchiveJSON{
 				Sessions:     stat.Sessions,
 				RawRecords:   stat.RawRecords,
@@ -125,21 +143,22 @@ func cmdDoctor(asJSON bool) error {
 	// regardless of source (Claude Code and OpenCode both feed the same L0), so
 	// make the active backend, its models, and how to change them explicit —
 	// otherwise a user who installed both is left guessing which LLM mines their
-	// sessions. Empty models mean "let the runner pick its environment default".
-	runnerCmd := "claude -p"
-	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
-		runnerCmd = "opencode serve"
-	}
+	// sessions. runnerCmd is the runner's own invocation hint (set above); empty
+	// models mean "let the runner pick its environment default".
 	fmt.Println()
 	fmt.Println("  " + bold("Distillation"))
 	fmt.Printf("    %s %s  %s\n", label("runner"), cyan(cfg.Runner),
 		dim(fmt.Sprintf("(via `%s`; distills ALL sessions — Claude Code + OpenCode)", runnerCmd)))
 	fmt.Printf("    %s triage=%s  distill=%s\n", label("models"),
 		modelOrDefault(cfg.TriageModel, runnerCmd), modelOrDefault(cfg.DistillModel, runnerCmd))
-	if strings.EqualFold(strings.TrimSpace(cfg.Runner), "opencode") {
-		fmt.Printf("    %s %s\n", label("oc models"), opencodeModels)
+	// Show the runner's model check unless it's the trivial "OK" with no models to
+	// check (Claude's no-op): a non-OK status, or any status when models are set, is
+	// worth surfacing. Runner-neutral — no branch on the runner name.
+	if modelStatus != "OK" || strings.TrimSpace(cfg.TriageModel) != "" || strings.TrimSpace(cfg.DistillModel) != "" {
+		fmt.Printf("    %s %s\n", label("models ok"), modelStatus)
 	}
 	fmt.Printf("    %s review_every=%d  poignancy=%d\n", label("review"), cfg.ReviewEvery, cfg.ReviewPoignancy)
+	fmt.Printf("    %s enabled=%t  interval=%dm  session_budget=%d\n", label("auto"), cfg.AutoDistill, cfg.AutoDistillIntervalMinutes, cfg.AutoDistillSessionBudget)
 	fmt.Printf("    %s witness install <claude|opencode>  %s\n", dim("↳ switch runner:"), dim("(re-binds the runner)"))
 	fmt.Printf("    %s edit %s  %s\n", dim("↳ set models:  "), st.ConfigPath(), dim("(triage_model, distill_model)"))
 
@@ -191,19 +210,22 @@ func modelOrDefault(model, runnerCmd string) string {
 }
 
 type doctorJSON struct {
-	DataRoot       string             `json:"data_root"`
-	Config         doctorConfigJSON   `json:"config"`
-	OpenCodeModels string             `json:"opencode_models"`
-	Archive        doctorArchiveJSON  `json:"archive"`
-	Embedder       doctorEmbedderJSON `json:"embedder"`
+	DataRoot   string             `json:"data_root"`
+	Config     doctorConfigJSON   `json:"config"`
+	ModelCheck string             `json:"model_check"` // runner's model validation: "OK" / "INVALID: …" (runner-neutral)
+	Archive    doctorArchiveJSON  `json:"archive"`
+	Embedder   doctorEmbedderJSON `json:"embedder"`
 }
 
 type doctorConfigJSON struct {
-	Runner          string `json:"runner"`
-	TriageModel     string `json:"triage_model"`
-	DistillModel    string `json:"distill_model"`
-	ReviewEvery     int    `json:"review_every"`
-	ReviewPoignancy int    `json:"review_poignancy"`
+	Runner                     string `json:"runner"`
+	TriageModel                string `json:"triage_model"`
+	DistillModel               string `json:"distill_model"`
+	ReviewEvery                int    `json:"review_every"`
+	ReviewPoignancy            int    `json:"review_poignancy"`
+	AutoDistill                bool   `json:"auto_distill"`
+	AutoDistillIntervalMinutes int    `json:"auto_distill_interval_minutes"`
+	AutoDistillSessionBudget   int    `json:"auto_distill_session_budget"`
 }
 
 type doctorArchiveJSON struct {

@@ -8,17 +8,19 @@ import (
 	"path/filepath"
 	"strings"
 
-	opencodeplugin "github.com/IngTian/witness/internal/runtimes/opencode/plugin"
+	"github.com/IngTian/witness/internal/platform"
+	opencodeplugin "github.com/IngTian/witness/internal/platform/opencode/plugin"
 	"github.com/IngTian/witness/internal/store"
 	"github.com/spf13/cobra"
 )
 
 func newInstallCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "install <claude|opencode>",
-		Short: "Install witness integrations.",
-		Long:  "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.",
-		Args:  cobra.ExactArgs(1),
+		Use:    "install <claude|opencode>",
+		Short:  "Install witness integrations.",
+		Long:   "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.",
+		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
+		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdInstall(args)
 		},
@@ -27,10 +29,11 @@ func newInstallCmd() *cobra.Command {
 
 func newUninstallCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "uninstall <claude|opencode>",
-		Short: "Remove witness integrations without deleting data.",
-		Long:  "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
-		Args:  cobra.ExactArgs(1),
+		Use:    "uninstall <claude|opencode>",
+		Short:  "Remove witness integrations without deleting data.",
+		Long:   "Remove the Claude Code or OpenCode integration. The witness data store and config are left untouched.",
+		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
+		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmdUninstall(args)
 		},
@@ -326,17 +329,12 @@ func repoShim() (string, error) {
 // runtime into config.toml.
 func cmdInstall(args []string) error {
 	target := installTarget(args)
-	switch target {
-	case "claude":
-		if err := cmdInstallClaude(); err != nil {
-			return err
-		}
-	case "opencode":
-		if err := cmdInstallOpenCode(); err != nil {
-			return err
-		}
-	default:
-		return fmt.Errorf("unknown install target %q (want claude or opencode)", target)
+	in, ok := platform.InstallerFor(target)
+	if !ok {
+		return fmt.Errorf("unknown install target %q (want %s)", target, strings.Join(platform.InstallTargets(), " or "))
+	}
+	if err := in.Install(); err != nil {
+		return err
 	}
 	return bindRunner(target)
 }
@@ -456,14 +454,11 @@ func cmdInstallOpenCode() error {
 // Data, config, and the runner setting are left untouched.
 func cmdUninstall(args []string) error {
 	target := installTarget(args)
-	switch target {
-	case "claude":
-		return cmdUninstallClaude()
-	case "opencode":
-		return cmdUninstallOpenCode()
-	default:
-		return fmt.Errorf("unknown uninstall target %q (want claude or opencode)", target)
+	in, ok := platform.InstallerFor(target)
+	if !ok {
+		return fmt.Errorf("unknown uninstall target %q (want %s)", target, strings.Join(platform.InstallTargets(), " or "))
 	}
+	return in.Uninstall()
 }
 
 func cmdUninstallClaude() error {

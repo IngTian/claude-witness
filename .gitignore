@@ -56,3 +56,4 @@ assets/e5-small/*.onnx_data
 /npm/opencode/assets/
 /npm/opencode/node_modules/
 /npm/opencode/*.tgz
+/npm/platform/*/bin/
