@@ -106,9 +106,20 @@ func (s *OpenCodeServer) Run(ctx context.Context, model, systemPrompt, input str
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
+	// Concurrency (issue #22): the lock guards ONLY the closed check, NOT the whole
+	// request. Each Run creates its own isolated OpenCode session and shares no
+	// per-request state; s.client is safe for concurrent use and baseURL/authHeader
+	// are read-only after construction. A benchmark against a real `opencode serve`
+	// confirmed the server accepts many concurrent isolated sessions (submit latency
+	// stays flat as N rises), so holding the mutex across the whole 10-min request —
+	// as this used to — needlessly serialized the engine's parallel drain. If Close
+	// flips `closed` after we pass this check, the in-flight HTTP call just fails
+	// against the shutting-down server and the session stays pending for retry — the
+	// same graceful outcome as any transport error, no corruption.
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
 		return "", fmt.Errorf("opencode server is closed")
 	}
 	sessionID, err := s.createSession(ctx, model)

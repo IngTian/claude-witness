@@ -62,13 +62,15 @@ func (r *runner) ValidateModels(ctx context.Context, models ...string) error {
 
 func (*runner) InvocationHint() string { return "opencode serve" }
 
-// ConcurrentRunSafe is false FOR NOW: OpenCodeServer.Run holds a whole-request
-// mutex (server.go), so concurrent engine Run calls serialize on it. A benchmark
-// against a real `opencode serve` (issue #22) confirmed the SERVER itself accepts
-// concurrent isolated sessions — the mutex is over-conservative — so a follow-up
-// PR narrows the lock to the closed-check and flips this to true. Kept false until
-// that lands so this PR ships zero OpenCode behavior change.
-func (*runner) ConcurrentRunSafe() bool { return false }
+// ConcurrentRunSafe is true: OpenCodeServer.Run now holds its mutex only for the
+// closed-check (server.go), not the whole request, and each Run drives its own
+// isolated OpenCode session over the shared http.Client. A benchmark against a
+// real `opencode serve` confirmed the server accepts many concurrent isolated
+// sessions (see the local concurrency probe / issue #22), so the engine may mine
+// several OpenCode sessions at once. If the configured PROVIDER rate-limits, the
+// excess requests queue at the provider and witness's existing backoff absorbs it
+// — that is a provider property, not a witness serialization constraint.
+func (*runner) ConcurrentRunSafe() bool { return true }
 
 // cleanupDistillSessions removes witness's own distill sessions from the OpenCode
 // DB so they aren't re-ingested as user sessions. Lives beside the runner so both
