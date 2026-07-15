@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // reservedLens is the filename stem of the cross-lens profile summary
@@ -23,9 +24,15 @@ const reservedLens = "unified"
 // This is the ONE piece of legitimate default-lens specialness that lives at the
 // identity layer: default is not treated differently by the engine (every lens is
 // just a prompt + a name), but its name is protected so no registered lens can
-// impersonate it. The check is on the sanitized name (registry filesystem key).
+// impersonate it. The check is on the sanitized name (registry filesystem key),
+// case-FOLDED: the reserved identities collide with the built-ins on the case-
+// insensitive filesystems witness's primary platforms use (macOS APFS, Windows
+// NTFS), where profile/Default.md and profile/default.md are the SAME file. A case-
+// sensitive check would let `register Default` through, and its per-lens summary
+// would then silently clobber the built-in's profile — exactly the impersonation
+// this guard exists to prevent. Folding closes that bypass on every platform.
 func ReservedLensName(name string) bool {
-	n := sanitize(name)
+	n := strings.ToLower(sanitize(name))
 	return n == reservedLens || n == LensDefault
 }
 
