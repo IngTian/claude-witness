@@ -205,17 +205,33 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 		return err
 	}
 	if !ran {
-		fmt.Println("another distillation worker is already running; it will pick up the backfill — nothing more to do here")
-		return nil
+		// Another worker already holds the drain lock, so our foreground drain didn't run.
+		// For a plain BACKFILL that's fine: nothing was dropped, and the reset watermark
+		// means that worker re-mines this lens as part of its own drain — nothing to do.
+		if !rebuild {
+			fmt.Println("another distillation worker is already running; it will pick up the backfill — nothing more to do here")
+			return nil
+		}
+		// For a REBUILD it is NOT fine: we already dropped this lens's observations AND
+		// facets. The running worker will re-mine L1, but the review that rebuilds the
+		// dropped facets + profile is ReviewDue-gated and may never fire on a small/low-
+		// poignancy archive — so the lens would be left with empty facets + a stale
+		// profile. Don't claim success: report the exact state and the recovery step.
+		return fmt.Errorf("rebuild %q incomplete: dropped this lens's observations + facets and reset its watermark, but another distillation worker is already running so the re-mine + review could not run here — once it finishes, run `witness review` to rebuild the facets/profile (or re-run `witness lens rebuild %s`)", name, name)
 	}
-	// End-state check (mirrors `distill start --all`): the reset lens must be caught
+	// End-state check (mirrors `distill start --all`): the RESET lens must be caught
 	// up. runWorker swallows per-session failures, so a nil error alone isn't "done".
+	// Scope the check to JUST this lens (not every active lens): a DIFFERENT lens being
+	// pending or backed off is unrelated to whether THIS single-lens backfill finished,
+	// and counting it would falsely report the backfill as incomplete (the drain even
+	// skips a backed-off sibling by design — worker.go LensBackedOff — so its backoff
+	// legitimately persists).
 	st2, err := store.Open()
 	if err != nil {
 		return err
 	}
 	defer st2.Close()
-	stats := st2.Stats(activeLensNames(st2))
+	stats := st2.Stats([]string{minedName})
 	if remaining := stats.Pending + stats.BackedOff; remaining > 0 {
 		return fmt.Errorf("backfill incomplete: %d session(s) still pending, %d backed off — mining did not finish (check `witness doctor` / witness.log)", stats.Pending, stats.BackedOff)
 	}
@@ -234,7 +250,11 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 			return fmt.Errorf("rebuild %q: review failed; observations were re-mined but facets/profile are not rebuilt (run `witness review`): %w", name, err)
 		}
 		if !ran {
-			fmt.Println("another worker holds the lock; it will run the review — facets/profile will rebuild as part of its drain")
+			// A worker grabbed the drain lock between our drain and this review. Its review
+			// is ReviewDue-gated and may not fire, so the dropped facets could stay empty —
+			// don't claim success; tell the user how to finish. (Same failure mode as the
+			// !ran rebuild branch above, just a narrower race window.)
+			return fmt.Errorf("rebuild %q: re-mined observations but another worker took the drain lock before the review could run — facets/profile are not yet rebuilt; run `witness review` to finish", name)
 		}
 	}
 	fmt.Printf("lens %q backfill complete\n", name)

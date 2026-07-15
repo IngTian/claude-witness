@@ -242,6 +242,27 @@ func TestLensBackedOff(t *testing.T) {
 	}
 }
 
+// A single-lens backfill's end-state check scopes Stats to JUST the backfilled lens.
+// This guards that scoping: a DIFFERENT lens being pending/backed-off must not show up
+// in the target lens's Stats, or `lens backfill X` would falsely report "incomplete"
+// because unrelated lens Y is behind (the CLI passes []string{X} for exactly this).
+func TestStatsScopedToSingleLensExcludesSiblingBackoff(t *testing.T) {
+	s := tempStore(t)
+	appendN(t, s, "a", 2)
+	s.MarkDistilled("a", "codereview", 2)                             // codereview (the "backfilled" lens) caught up
+	_ = s.SetNextAttempt("a", LensDefault, time.Now().Add(time.Hour)) // default (a sibling) backed off
+
+	// Scoped to codereview alone: caught up → nothing pending, nothing backed off.
+	if st := s.Stats([]string{"codereview"}); st.Pending != 0 || st.BackedOff != 0 {
+		t.Fatalf("codereview alone must be clean: pending=%d backedOff=%d", st.Pending, st.BackedOff)
+	}
+	// Whole active set: default's backoff shows — which is why the backfill check must
+	// NOT use the whole set (that was the bug).
+	if st := s.Stats([]string{LensDefault, "codereview"}); st.BackedOff != 1 {
+		t.Fatalf("whole-set Stats should still see default's backoff: backedOff=%d", st.BackedOff)
+	}
+}
+
 func TestNextBackoffAttempt(t *testing.T) {
 	s := tempStore(t)
 	now := time.Date(2026, 7, 4, 10, 0, 0, 0, time.UTC)
