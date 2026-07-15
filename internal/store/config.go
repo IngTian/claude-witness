@@ -328,11 +328,13 @@ func (s *Store) StampReview() error {
 }
 
 // SessionsSinceReview counts sessions distilled since the last review stamp.
+// Progress is per-(session,lens), so COUNT DISTINCT session — else a session mined
+// by N lenses would count N times and trip the review cadence N× too early.
 func (s *Store) SessionsSinceReview() int {
 	last := s.metaStr("review_ts")
 	var n int
 	_ = s.db.QueryRow(
-		`SELECT COUNT(*) FROM progress WHERE distilled_at != '' AND distilled_at > ?`, last).Scan(&n)
+		`SELECT COUNT(DISTINCT session) FROM progress WHERE distilled_at != '' AND distilled_at > ?`, last).Scan(&n)
 	return n
 }
 
@@ -386,7 +388,15 @@ func (s *Store) ReviewDue(cfg Config) bool {
 
 // EnableLens adds a lens name to the globally-enabled set (idempotent). It runs
 // on every session thereafter. Rewrites config.toml, preserving all other lines.
-func (s *Store) EnableLens(name string) error { return s.rewriteEnabledLens(name, true) }
+// A reserved name (the always-on built-in / the unified summary) is refused:
+// belt-and-suspenders alongside RegisterLens, so even a config hand-edit that
+// slipped a reserved name into the registry can't enable it into the active set.
+func (s *Store) EnableLens(name string) error {
+	if ReservedLensName(name) {
+		return fmt.Errorf("lens name %q is reserved and cannot be enabled (the built-in %q lens always runs)", name, LensDefault)
+	}
+	return s.rewriteEnabledLens(name, true)
+}
 
 // DisableLens removes a lens from the enabled set (no-op if absent).
 func (s *Store) DisableLens(name string) error { return s.rewriteEnabledLens(name, false) }
