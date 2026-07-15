@@ -70,6 +70,39 @@ func TestLensDirectivesAreHeaderOnly(t *testing.T) {
 	}
 }
 
+// Regression (audit finding): a lens whose header comment is never closed before the
+// section markers must NOT silently swallow `## EXTRACT`/`## REVIEW` and yield empty
+// prompts — the section markers are structural delimiters that end the header and any
+// open comment. A lens with empty Extract/Review would distill on empty system prompts,
+// a silent failure surfacing only much later as prose drift.
+func TestUnclosedHeaderCommentDoesNotEatSections(t *testing.T) {
+	dir := t.TempDir()
+	def := "# name: real\n" +
+		"# dimensions: a, b\n" +
+		"<!--\n" +
+		"  the author forgot to close this comment\n" +
+		"## EXTRACT\n" +
+		"Emit observations.\n" +
+		"## REVIEW\n" +
+		"Synthesize.\n"
+	if err := os.MkdirAll(filepath.Join(dir, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "real", "lens.md"), []byte(def), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, err := LoadRegistered("real", dir)
+	if err != nil {
+		t.Fatalf("LoadRegistered: %v", err)
+	}
+	if !strings.Contains(l.Extract, "Emit observations.") {
+		t.Fatalf("unclosed header comment ate the EXTRACT section, got Extract=%q", l.Extract)
+	}
+	if !strings.Contains(l.Review, "Synthesize.") {
+		t.Fatalf("unclosed header comment ate the REVIEW section, got Review=%q", l.Review)
+	}
+}
+
 // The reserved-name guard's ultimate backstop: a lens registered under an innocent
 // directory name whose `# name:` header resolves to a reserved identity ("default"
 // or "unified") must be REJECTED at load — else it would impersonate the always-on

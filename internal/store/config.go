@@ -241,7 +241,15 @@ func (s *Store) setConfigKey(key, value string) error {
 	set := false
 	if len(data) > 0 {
 		for _, line := range strings.Split(string(data), "\n") {
-			if strings.TrimSpace(line) == configTemplateUnboundMarker {
+			// Drop the unbound-runner marker ONLY when binding the runner itself — that
+			// write also stamps runnerBoundKey (via SetRunner/SetConfigString), so
+			// ResolveRunner ignores the marker anyway. Stripping it for a MODEL key would
+			// silently disable the WITNESS_RUNNER env fallback the npm OpenCode-plugin
+			// user depends on: they never run `witness install`, so their runner stays
+			// unbound and env-resolved, and a routine `config set triage_model` (which
+			// this tool's own doctor remedy recommends) must not flip their runner back
+			// to the "claude" template default and break all distillation. See ResolveRunner.
+			if key == "runner" && strings.TrimSpace(line) == configTemplateUnboundMarker {
 				continue
 			}
 			if isConfigKeyLine(line, key) {

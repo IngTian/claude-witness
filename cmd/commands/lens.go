@@ -318,7 +318,9 @@ func lensShow(st *store.Store, name string) error {
 // renderLensMarkdown reconstructs a lens's definition in the standard lens-file shape
 // (header directives + the two prompt sections). Used for the built-in lens, which has
 // no single markdown source; the plain text goes to stdout verbatim (no styling) so it
-// can be piped or copied into a new lens file.
+// can be read, piped, or used as a STARTING POINT for a new lens. Note the emitted
+// `# name: default` line resolves to a reserved identity, so a copy must be renamed
+// (change the `# name:` line) before `witness lens register` will accept it.
 func renderLensMarkdown(l *lens.Lens) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# name: %s\n", l.Name)

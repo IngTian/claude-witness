@@ -132,6 +132,25 @@ func parseLensFile(s string) *Lens {
 	for _, line := range strings.Split(s, "\n") {
 		trimmed := strings.TrimSpace(line)
 
+		// A `## EXTRACT`/`## REVIEW` line is a STRUCTURAL delimiter: it always ends the
+		// header (and forcibly closes any open header comment) and starts its section.
+		// Checking it FIRST — before the comment-swallow below — means a malformed or
+		// unclosed `<!--` in the header can't silently eat the section markers and leave
+		// a lens with empty prompts (a silent-failure the reviewer catches as drift only
+		// much later). Tradeoff: a bare `## EXTRACT` line sitting inside a documentation
+		// comment would start the section early — but that is rare and produces a
+		// visibly-wrong prompt, not a silent-empty one, so it's the safer failure mode.
+		switch trimmed {
+		case "## EXTRACT":
+			section = "extract"
+			inComment = false
+			continue
+		case "## REVIEW":
+			section = "review"
+			inComment = false
+			continue
+		}
+
 		// Track HTML-comment nesting on lines that belong to the HEADER (a comment inside
 		// a prompt section is verbatim prompt text, handled by the section writer below).
 		if section == "" {
@@ -157,10 +176,6 @@ func parseLensFile(s string) *Lens {
 					l.Dimensions = append(l.Dimensions, d)
 				}
 			}
-		case trimmed == "## EXTRACT":
-			section = "extract"
-		case trimmed == "## REVIEW":
-			section = "review"
 		default:
 			switch section {
 			case "extract":
