@@ -24,49 +24,9 @@ func TestLoadRegistered(t *testing.T) {
 	if l.Name != "math" || l.Global || l.Extract == "" || l.Review == "" || len(l.Dimensions) != 2 {
 		t.Fatalf("parsed lens wrong: %+v", l)
 	}
-	// A registered lens with no `# kind:` header defaults to arc (recall-safe) —
-	// backward-compat for pre-#57 lens files.
-	if l.Kind != KindArc {
-		t.Fatalf("kind-less registered lens must default to %q, got %q", KindArc, l.Kind)
-	}
 
 	if _, err := LoadRegistered("missing", dir); err == nil {
 		t.Fatalf("expected error for unregistered lens")
-	}
-}
-
-// The optional `# kind:` header (#57 PR2) parses when present, and an unknown kind
-// normalizes to the recall-safe arc default.
-func TestLoadRegisteredParsesKind(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name, def string) *Lens {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, name, "lens.md"), []byte(def), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		l, err := LoadRegistered(name, dir)
-		if err != nil {
-			t.Fatalf("LoadRegistered(%s): %v", name, err)
-		}
-		return l
-	}
-
-	// Explicit atomic.
-	if l := write("atomiclens", "# name: atomiclens\n# kind: atomic\n## EXTRACT\nx\n## REVIEW\ny\n"); l.Kind != KindAtomic {
-		t.Fatalf("explicit `# kind: atomic` must parse as %q, got %q", KindAtomic, l.Kind)
-	}
-
-	// Explicit arc (case-insensitive kind).
-	if l := write("arclens", "# name: arclens\n# kind: ARC\n## EXTRACT\nx\n## REVIEW\ny\n"); l.Kind != KindArc {
-		t.Fatalf("`# kind: ARC` must normalize to %q, got %q", KindArc, l.Kind)
-	}
-
-	// An unknown/garbage kind normalizes to arc (recall-safe), not left as-is.
-	if l := write("weird", "# name: weird\n# kind: banana\n## EXTRACT\nx\n## REVIEW\ny\n"); l.Kind != KindArc {
-		t.Fatalf("unknown kind must normalize to %q, got %q", KindArc, l.Kind)
 	}
 }
 
@@ -77,11 +37,11 @@ func TestLoadRegisteredParsesKind(t *testing.T) {
 func TestLensDirectivesAreHeaderOnly(t *testing.T) {
 	dir := t.TempDir()
 	def := "# name: real\n" +
-		"# kind: atomic\n" +
+		"# dimensions: a, b\n" +
 		"<!--\n" +
 		"  Docs for the author. These mentions must be IGNORED:\n" +
-		"  # kind: arc | atomic\n" +
 		"  # name: not-the-real-name\n" +
+		"  # dimensions: x, y, z\n" +
 		"-->\n" +
 		"## EXTRACT\n" +
 		"Emit observations.\n" +
@@ -101,8 +61,8 @@ func TestLensDirectivesAreHeaderOnly(t *testing.T) {
 	if l.Name != "real" {
 		t.Fatalf("comment `# name:` must not override the real name, got %q", l.Name)
 	}
-	if l.Kind != KindAtomic {
-		t.Fatalf("comment `# kind: arc` must not override the real `atomic`, got %q", l.Kind)
+	if len(l.Dimensions) != 2 {
+		t.Fatalf("comment `# dimensions:` must not append to the real header, got %v", l.Dimensions)
 	}
 	// The prompt-section `# ...` line is preserved verbatim as prompt text.
 	if !strings.Contains(l.Extract, "# this looks like a directive but it's prompt text") {

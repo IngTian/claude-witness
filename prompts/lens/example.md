@@ -1,6 +1,5 @@
 # name: math
 # dimensions: speed, independence, proof_rigor, abstraction, confusion_tolerance
-# kind: arc
 
 <!--
   A complete, ready-to-register example lens (a "math learner" lens).
@@ -17,20 +16,12 @@
   user message; it injects no schema for you. Anything outside the two `##` sections
   (like this comment) is ignored by the loader.
 
-  One OPTIONAL directive (shown above; omit it and a sensible default applies):
-    # kind: arc | atomic
-        "arc"   — an observation needs a whole-session arc (e.g. a confusion that
-                  resolves later); chunking a long session loses most of these, so
-                  the engine sends the session whole / reconciles across chunks.
-        "atomic"— per-moment observations that fit in a fragment; chunk-tolerant.
-        A registered lens that omits `# kind:` defaults to "arc" (the recall-safe
-        choice — a mislabeled arc lens loses far more than a mislabeled atomic one).
-
   Note on models: mining uses ONE global model for every lens (set via `witness
-  install` / `witness config`). There is no per-lens model yet, so a lens that needs
-  a stronger model just means "point your global runner at a capable model." An arc
-  lens like this one won't extract well on a weak model — it will silently produce
-  nothing rather than error.
+  install` or `witness config set triage_model <model>`). There is no per-lens model
+  yet, so a lens that needs a stronger model just means "point your global runner at a
+  capable one." A reasoning-heavy lens like this won't extract well on a weak model —
+  it will silently produce nothing rather than error (run `witness doctor` to see the
+  drift count). Use a capable model (sonnet/opus-class) for lenses like this.
 -->
 
 

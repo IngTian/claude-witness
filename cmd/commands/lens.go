@@ -54,7 +54,7 @@ func newLensCmd() *cobra.Command {
 		&cobra.Command{
 			Use:   "show <name>",
 			Short: "Print a registered lens's definition (markdown).",
-			Long:  "Print the raw markdown a lens was registered with (its `# name:`/`# dimensions:`/`# kind:` header + the EXTRACT and REVIEW prompts). Use `default` to print the built-in lens.",
+			Long:  "Print the raw markdown a lens was registered with (its `# name:`/`# dimensions:` header + the EXTRACT and REVIEW prompts). Use `default` to print the built-in lens.",
 			Args:  cobra.ExactArgs(1),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"show"}, args...)) },
 		},
@@ -324,9 +324,6 @@ func renderLensMarkdown(l *lens.Lens) string {
 	fmt.Fprintf(&b, "# name: %s\n", l.Name)
 	if len(l.Dimensions) > 0 {
 		fmt.Fprintf(&b, "# dimensions: %s\n", strings.Join(l.Dimensions, ", "))
-	}
-	if l.Kind != "" {
-		fmt.Fprintf(&b, "# kind: %s\n", l.Kind)
 	}
 	fmt.Fprintf(&b, "\n## EXTRACT\n%s\n\n## REVIEW\n%s\n", l.Extract, l.Review)
 	return b.String()
