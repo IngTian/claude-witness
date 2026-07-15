@@ -34,7 +34,7 @@ func cmdProfile(args []string, asJSON bool) error {
 		return err
 	}
 	defer st.Close()
-	lensName := "unified"
+	lensName := store.LensUnified
 	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
 		lensName = strings.TrimSpace(args[0])
 	}
