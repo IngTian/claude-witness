@@ -11,6 +11,24 @@ import (
 // would clobber the unified portrait.
 const reservedLens = "unified"
 
+// ReservedLensName reports whether a lens name is reserved and may not be taken by
+// a registered lens. Two names are reserved:
+//   - LensDefault ("default") — the always-on built-in lens's identity. A second
+//     lens under this name would share the built-in's (session,'default') watermark
+//     and observation key, corrupting the backbone lens's data (two prompts writing
+//     Lens='default', one progress row, cross-contaminated dedup).
+//   - reservedLens ("unified") — the cross-lens profile summary's filename stem; a
+//     per-lens summary under this name would clobber the unified portrait.
+//
+// This is the ONE piece of legitimate default-lens specialness that lives at the
+// identity layer: default is not treated differently by the engine (every lens is
+// just a prompt + a name), but its name is protected so no registered lens can
+// impersonate it. The check is on the sanitized name (registry filesystem key).
+func ReservedLensName(name string) bool {
+	n := sanitize(name)
+	return n == reservedLens || n == LensDefault
+}
+
 // LensesDir is the central lens registry: <root>/lenses/<name>/lens.md. Lenses
 // live here (not in repos) so the same definition is shared across all sessions.
 func (s *Store) LensesDir() string { return filepath.Join(s.Root, "lenses") }
@@ -18,8 +36,8 @@ func (s *Store) LensesDir() string { return filepath.Join(s.Root, "lenses") }
 // RegisterLens copies a lens definition file into the registry under `name`,
 // creating/overwriting <root>/lenses/<name>/lens.md.
 func (s *Store) RegisterLens(name, srcPath string) error {
-	if sanitize(name) == reservedLens {
-		return fmt.Errorf("lens name %q is reserved for the cross-lens profile summary", name)
+	if ReservedLensName(name) {
+		return fmt.Errorf("lens name %q is reserved (the always-on built-in lens or the cross-lens summary); choose another name", name)
 	}
 	data, err := os.ReadFile(srcPath)
 	if err != nil {
