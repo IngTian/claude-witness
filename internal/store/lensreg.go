@@ -14,7 +14,7 @@ import (
 //     lens under this name would share the built-in's (session,'default') watermark
 //     and observation key, corrupting the backbone lens's data (two prompts writing
 //     Lens='default', one progress row, cross-contaminated dedup).
-//   - LensUnified ("unified") — the cross-lens profile summary's filename stem; a
+//   - ProfileUnified ("unified") — the cross-lens profile summary's filename stem; a
 //     per-lens summary under this name would clobber the unified portrait.
 //
 // This is the ONE piece of legitimate default-lens specialness that lives at the
@@ -29,7 +29,7 @@ import (
 // this guard exists to prevent. Folding closes that bypass on every platform.
 func ReservedLensName(name string) bool {
 	n := strings.ToLower(sanitize(name))
-	return n == LensUnified || n == LensDefault
+	return n == ProfileUnified || n == LensDefault
 }
 
 // LensesDir is the central lens registry: <root>/lenses/<name>/lens.md. Lenses

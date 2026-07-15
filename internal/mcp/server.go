@@ -236,7 +236,7 @@ func newServer(st *store.Store, emb Embedder, version string) *mcpsdk.Server {
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in getProfileInput) (*mcpsdk.CallToolResult, any, error) {
 		lensName := in.Lens
 		if lensName == "" {
-			lensName = store.LensUnified
+			lensName = store.ProfileUnified
 		}
 		md, ok, err := st.ReadProfile(lensName)
 		if err != nil {
