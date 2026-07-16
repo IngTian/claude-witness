@@ -105,6 +105,43 @@ func (s *Store) LastRawTS() string {
 	return ts
 }
 
+// SampleSessions returns up to n session ids ordered by total raw text size,
+// LARGEST first (tie-broken by id for a stable order). Used by `witness lens try`
+// to pick a representative sample for a read-only prompt preview: size-descending
+// is deterministic across prompt edits (so v1-vs-v2 runs compare the SAME sessions)
+// and deliberately surfaces the meatiest, most chunk-prone sessions — the ones a
+// lens prompt is most likely to mishandle. Read-only; touches no watermark.
+func (s *Store) SampleSessions(n int) ([]string, error) {
+	if n < 1 {
+		n = 1
+	}
+	rows, err := s.db.Query(
+		`SELECT session FROM raw GROUP BY session ORDER BY SUM(LENGTH(text)) DESC, session LIMIT ?`, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var sess string
+		if err := rows.Scan(&sess); err != nil {
+			return nil, err
+		}
+		out = append(out, sess)
+	}
+	return out, rows.Err()
+}
+
+// RawBytes is the total byte length of a session's raw text — the same size metric
+// SampleSessions orders by, exposed so a preview can show how large (and thus how
+// chunk-prone) a session is. Returns 0 for an unknown session (errors swallowed,
+// matching RawCount — a size readout is cosmetic).
+func (s *Store) RawBytes(session string) int64 {
+	var n int64
+	_ = s.db.QueryRow(`SELECT COALESCE(SUM(LENGTH(text)), 0) FROM raw WHERE session = ?`, session).Scan(&n)
+	return n
+}
+
 // LastDistilledRawTS is the timestamp of the latest raw turn any lens has distilled
 // past — a cosmetic "how fresh is distillation" indicator for status/profile.
 // Progress is now per-(session,lens), so collapse it to one watermark per session
