@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,11 +17,13 @@ import (
 // `witness lens try` flags. Package-level so the cobra command's RunE closure can
 // bind them; one process per invocation, so shared state is fine.
 var (
-	trySessions int
-	trySession  string
-	tryModel    string
-	tryRecent   bool
-	tryJSON     bool
+	trySessions   int
+	trySession    string
+	tryModel      string
+	tryReviewFlag bool
+	tryReviewMdl  string
+	tryRecent     bool
+	tryJSON       bool
 )
 
 // newLensTryCmd builds the `try` subcommand. Unlike the other lens verbs (thin thunks
@@ -36,18 +39,39 @@ func newLensTryCmd() *cobra.Command {
 			"sessions are the ones a prompt is most likely to mishandle); use --recent for the latest.\n\n" +
 			"Works on both runners. On an OpenCode runner it briefly holds the worker lock while it runs " +
 			"(its shutdown sweep would otherwise disrupt a running worker); on Claude it needs no lock. " +
-			"Sessions are previewed in parallel (bounded by mine_concurrency).",
+			"Sessions are previewed in parallel (bounded by mine_concurrency).\n\n" +
+			"With --review, it also runs the lens's REVIEW prompt over the observations just mined and " +
+			"prints the profile facets it would synthesize — so you can tune both halves of a lens in one " +
+			"pass. (The synthesis is over the sampled sessions only, so cross-session change-detection is " +
+			"weak; register + backfill the lens for a full-history review.) Still writes nothing.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cmdLensTry(args[0], trySessions, trySession, tryModel, tryRecent, tryJSON)
+			return cmdLensTry(args[0], lensTryOpts{
+				nSessions: trySessions, oneSession: trySession, model: tryModel,
+				review: tryReviewFlag, reviewModel: tryReviewMdl, recent: tryRecent, asJSON: tryJSON,
+			})
 		},
 	}
 	c.Flags().IntVar(&trySessions, "sessions", 3, "number of sessions to sample")
 	c.Flags().StringVar(&trySession, "session", "", "preview one specific session id (bypasses sampling)")
-	c.Flags().StringVar(&tryModel, "model", "", "override the triage model for this run (e.g. test above a drift floor without editing config)")
+	c.Flags().StringVar(&tryModel, "model", "", "override the triage (extract) model for this run (e.g. test above a drift floor without editing config)")
+	c.Flags().BoolVar(&tryReviewFlag, "review", false, "also preview the REVIEW prompt: synthesize profile facets from the mined observations")
+	c.Flags().StringVar(&tryReviewMdl, "review-model", "", "override the distill (review) model for --review (defaults to distill_model)")
 	c.Flags().BoolVar(&tryRecent, "recent", false, "sample the most recent sessions instead of the largest")
 	c.Flags().BoolVarP(&tryJSON, "json", "j", false, "output as JSON")
 	return c
+}
+
+// lensTryOpts groups the try flags — the signature had grown past readability, and a
+// struct keeps call sites (and tests) honest about which knob is which.
+type lensTryOpts struct {
+	nSessions   int
+	oneSession  string
+	model       string // --model: overrides extract (triage) model
+	review      bool   // --review: also run the REVIEW prompt over the mined observations
+	reviewModel string // --review-model: overrides review (distill) model
+	recent      bool
+	asJSON      bool
 }
 
 // --- JSON output shape (stable, for diffing v1-vs-v2 prompt runs) -------------
@@ -70,6 +94,23 @@ type lensTrySessionJSON struct {
 	Observations []lensTryObsJSON `json:"observations"`
 }
 
+// lensTryFacetJSON is one facet the REVIEW preview synthesized (only with --review).
+type lensTryFacetJSON struct {
+	Dimension   string   `json:"dimension"`
+	Key         string   `json:"key"`
+	Value       string   `json:"value"`
+	Confidence  float64  `json:"confidence"`
+	BecauseOf   []string `json:"because_of"`
+	Contradicts bool     `json:"contradicts_prior"`
+}
+
+// lensTryReviewJSON is the REVIEW-preview block (present only with --review).
+type lensTryReviewJSON struct {
+	Model  string             `json:"model"`           // the review (distill) model used
+	Error  string             `json:"error,omitempty"` // set if the review call failed
+	Facets []lensTryFacetJSON `json:"facets"`
+}
+
 type lensTryJSON struct {
 	Lens       string               `json:"lens"`
 	Model      string               `json:"model"`
@@ -77,6 +118,7 @@ type lensTryJSON struct {
 	Sessions   []lensTrySessionJSON `json:"sessions"`
 	TotalObs   int                  `json:"total_observations"`
 	DriftedAny bool                 `json:"drifted_any"`
+	Review     *lensTryReviewJSON   `json:"review,omitempty"` // present only with --review
 }
 
 // cmdLensTry runs the read-only preview. It opens its OWN store (independent of cmdLens)
@@ -84,7 +126,7 @@ type lensTryJSON struct {
 // runner it holds the single-flight WorkerLock for the runner's whole lifetime because
 // OpenCode's Close() runs a process-global sweep that would delete a concurrent worker's
 // in-flight distill session; on Claude (no sweep) it stays lock-free.
-func cmdLensTry(file string, nSessions int, oneSession, model string, recent, asJSON bool) error {
+func cmdLensTry(file string, opts lensTryOpts) error {
 	st, err := store.Open()
 	if err != nil {
 		return err
@@ -105,20 +147,28 @@ func cmdLensTry(file string, nSessions int, oneSession, model string, recent, as
 		ln.Name = "candidate"
 		candidate = true
 	}
+	// --review needs a REVIEW section to run. Fail early (before any runner work) rather
+	// than silently skipping the half the user explicitly asked for.
+	if opts.review && strings.TrimSpace(ln.Review) == "" {
+		return fmt.Errorf("--review needs a REVIEW section in %q, but the lens file has none", file)
+	}
 
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
-	// --model overrides the triage model for THIS run. Must be applied BEFORE the runner
-	// is minted/opened: OpenCode's Open starts `opencode serve` bound to cfg.TriageModel,
-	// so a later override would silently not reach the server. (Claude passes it per Run,
-	// so timing is looser there, but set it here uniformly.)
-	if model != "" {
-		cfg.TriageModel = model
+	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
+	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
+	// override would silently not reach the server. --model overrides EXTRACT (triage);
+	// --review-model overrides REVIEW (distill) — the two engine stages use two models.
+	if opts.model != "" {
+		cfg.TriageModel = opts.model
+	}
+	if opts.reviewModel != "" {
+		cfg.DistillModel = opts.reviewModel
 	}
 
 	// Resolve the session set (validation happens BEFORE any runner work, so a bad file/
 	// session never spawns a server or takes a lock).
-	sessions, err := resolveTrySessions(st, nSessions, oneSession, recent)
+	sessions, err := resolveTrySessions(st, opts.nSessions, opts.oneSession, opts.recent)
 	if err != nil {
 		return err
 	}
@@ -164,10 +214,45 @@ func cmdLensTry(file string, nSessions int, oneSession, model string, recent, as
 		return tryResult{obs: obs, chunks: chunks, drifted: drifted, err: err, elapsed: time.Since(start)}
 	})
 
-	if asJSON {
-		return lensTryEmitJSON(st, cfg, ln, candidate, sessions, results)
+	// --review (L1→L2): synthesize facets from the observations JUST mined above (never
+	// registered, never written). This is the chain-from-the-sample design: the review
+	// sees only the sampled sessions' observations, so cross-session change-detection is
+	// inherently weak (no accumulated `prior` facets to contradict) — documented in help.
+	var review *reviewPreview
+	if opts.review {
+		review = runReviewPreview(ctx, runFn, cfg, ln, results)
 	}
-	return lensTryRenderHuman(st, cfg, ln, candidate, sessions, results)
+
+	if opts.asJSON {
+		return lensTryEmitJSON(st, cfg, ln, candidate, sessions, results, review)
+	}
+	return lensTryRenderHuman(st, cfg, ln, candidate, sessions, results, review)
+}
+
+// reviewPreview is the outcome of the optional --review pass.
+type reviewPreview struct {
+	model  string
+	obsFed int // how many mined observations were synthesized (context for the reader)
+	facets []distill.PreviewFacet
+	err    error
+}
+
+// runReviewPreview collects the observations mined across all sessions and runs the
+// REVIEW prompt over them once (matching production, which reviews the whole L1 corpus
+// per lens, not per session). prior is empty: a candidate lens has no accumulated
+// facets, so change-detection has nothing to contradict — an inherent preview caveat.
+func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Config, ln *lens.Lens, results []tryResult) *reviewPreview {
+	var obs []store.Observation
+	for _, r := range results {
+		obs = append(obs, r.obs...)
+	}
+	rp := &reviewPreview{model: modelLabel(store.Config{TriageModel: cfg.DistillModel}), obsFed: len(obs)}
+	if len(obs) == 0 {
+		return rp // nothing mined → nothing to synthesize; not an error
+	}
+	facets, err := distill.PreviewReview(ctx, runFn, cfg, ln, obs, nil /* no prior facets for a candidate */)
+	rp.facets, rp.err = facets, err
+	return rp
 }
 
 // resolveTrySessions picks the sessions to preview: one specific --session (validated
@@ -253,12 +338,12 @@ func modelLabel(cfg store.Config) string {
 // lensTryRenderHuman prints the pre-computed results in SAMPLE ORDER (results[i] pairs
 // with sessions[i]). Rendering after the fan-out barrier — not during — is what keeps
 // output deterministic regardless of which session's mine finished first.
-func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, candidate bool, sessions []string, results []tryResult) error {
+func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, candidate bool, sessions []string, results []tryResult, review *reviewPreview) error {
 	name := ln.Name
 	if candidate {
 		name += dim(" (candidate — file's name was reserved)")
 	}
-	fmt.Printf("%s %s   %s %s\n", label("lens"), bold(name), dim("model:"), modelLabel(cfg))
+	fmt.Printf("%s %s   %s %s\n", label("lens"), bold(name), dim("extract model:"), modelLabel(cfg))
 	fmt.Printf("%s previewing %d session(s), read-only — nothing is written\n\n", label("try"), len(sessions))
 
 	total, driftedAny := 0, false
@@ -303,10 +388,46 @@ func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, candid
 		summary += " — some sessions drifted (see above)"
 	}
 	fmt.Printf("%s %s\n", label("total"), summary)
+
+	if review != nil {
+		lensTryRenderReviewHuman(review)
+	}
 	return nil
 }
 
-func lensTryEmitJSON(st *store.Store, cfg store.Config, ln *lens.Lens, candidate bool, sessions []string, results []tryResult) error {
+// lensTryRenderReviewHuman prints the REVIEW-preview block: the facets the lens's
+// REVIEW prompt would synthesize from the observations just mined. Kept visually
+// separate from the per-session extract output so the two stages read distinctly.
+func lensTryRenderReviewHuman(review *reviewPreview) {
+	fmt.Printf("\n%s %s   %s %s\n", label("review"),
+		dim(fmt.Sprintf("synthesizing %d mined observation(s)", review.obsFed)), dim("review model:"), review.model)
+	fmt.Printf("   %s\n", dim("(over the sampled sessions only — register + backfill for full-history change detection)"))
+	if review.err != nil {
+		fmt.Printf("   %s %s\n", badGlyph(), red("review failed: "+review.err.Error()))
+		return
+	}
+	if review.obsFed == 0 {
+		fmt.Printf("   %s\n", dim("(no observations were mined, so there is nothing to synthesize)"))
+		return
+	}
+	if len(review.facets) == 0 {
+		fmt.Printf("   %s\n", dim("(the REVIEW prompt asserted no facets from these observations)"))
+		return
+	}
+	for _, f := range review.facets {
+		change := ""
+		if f.Contradicts {
+			change = yellow(" [contradicts prior]")
+		}
+		fmt.Printf("   %s %s = %s%s\n",
+			dim(fmt.Sprintf("[%s/%s c%.2f]", f.Dimension, f.Key, f.Confidence)), bold(f.Key), f.Value, change)
+		if len(f.BecauseOf) > 0 {
+			fmt.Printf("       %s\n", dim(fmt.Sprintf("↳ because_of %d obs", len(f.BecauseOf))))
+		}
+	}
+}
+
+func lensTryEmitJSON(st *store.Store, cfg store.Config, ln *lens.Lens, candidate bool, sessions []string, results []tryResult, review *reviewPreview) error {
 	out := lensTryJSON{Lens: ln.Name, Model: modelLabel(cfg), Candidate: candidate}
 	for i, sess := range sessions {
 		r := results[i]
@@ -340,6 +461,23 @@ func lensTryEmitJSON(st *store.Store, cfg store.Config, ln *lens.Lens, candidate
 			out.DriftedAny = true
 		}
 		out.Sessions = append(out.Sessions, sj)
+	}
+	if review != nil {
+		rj := &lensTryReviewJSON{Model: review.model, Facets: []lensTryFacetJSON{}}
+		if review.err != nil {
+			rj.Error = review.err.Error()
+		}
+		for _, f := range review.facets {
+			bo := f.BecauseOf
+			if bo == nil {
+				bo = []string{}
+			}
+			rj.Facets = append(rj.Facets, lensTryFacetJSON{
+				Dimension: f.Dimension, Key: f.Key, Value: f.Value,
+				Confidence: f.Confidence, BecauseOf: bo, Contradicts: f.Contradicts,
+			})
+		}
+		out.Review = rj
 	}
 	return emitJSON(out)
 }

@@ -55,7 +55,7 @@ func TestLensTryBailsWhenWorkerBusyOnSweepingRunner(t *testing.T) {
 	}
 	defer unlock()
 
-	err := cmdLensTry(writeLensFile(t, validLensBody), 1, "", "", false, false)
+	err := cmdLensTry(writeLensFile(t, validLensBody), lensTryOpts{nSessions: 1})
 	if err == nil {
 		t.Fatalf("expected `lens try` to bail when a worker holds the lock on a sweeping runner")
 	}
@@ -77,7 +77,7 @@ func TestLensTryOnClaudeIsLockFree(t *testing.T) {
 
 	// Use an unknown --session so we hit the pre-mining validation error (no real claude
 	// call), which is only reachable if the lock did NOT block the claude path.
-	err := cmdLensTry(writeLensFile(t, validLensBody), 1, "does-not-exist", "", false, false)
+	err := cmdLensTry(writeLensFile(t, validLensBody), lensTryOpts{nSessions: 1, oneSession: "does-not-exist"})
 	if err == nil || !strings.Contains(err.Error(), "no raw turns") {
 		t.Fatalf("claude preview should be lock-free and reach --session validation, got: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestLensTryOnClaudeIsLockFree(t *testing.T) {
 // A missing EXTRACT section is a usage error surfaced before any runner work.
 func TestLensTryRejectsNoExtractFile(t *testing.T) {
 	seedTryStore(t, store.RunnerClaude)
-	err := cmdLensTry(writeLensFile(t, "# name: x\n## REVIEW\nonly review\n"), 1, "", "", false, false)
+	err := cmdLensTry(writeLensFile(t, "# name: x\n## REVIEW\nonly review\n"), lensTryOpts{nSessions: 1})
 	if err == nil || !strings.Contains(err.Error(), "EXTRACT") {
 		t.Fatalf("expected an EXTRACT-required error, got: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestLensTryRejectsNoExtractFile(t *testing.T) {
 // A missing file surfaces the read error (not a nil-lens panic).
 func TestLensTryMissingFile(t *testing.T) {
 	seedTryStore(t, store.RunnerClaude)
-	if err := cmdLensTry(filepath.Join(t.TempDir(), "nope.md"), 1, "", "", false, false); err == nil {
+	if err := cmdLensTry(filepath.Join(t.TempDir(), "nope.md"), lensTryOpts{nSessions: 1}); err == nil {
 		t.Fatalf("expected an error for a missing file")
 	}
 }
@@ -103,9 +103,21 @@ func TestLensTryMissingFile(t *testing.T) {
 // --session validation: an unknown session id is rejected before mining.
 func TestLensTryRejectsUnknownSession(t *testing.T) {
 	seedTryStore(t, store.RunnerClaude)
-	err := cmdLensTry(writeLensFile(t, validLensBody), 1, "does-not-exist", "", false, false)
+	err := cmdLensTry(writeLensFile(t, validLensBody), lensTryOpts{nSessions: 1, oneSession: "does-not-exist"})
 	if err == nil || !strings.Contains(err.Error(), "no raw turns") {
 		t.Fatalf("expected an unknown-session error, got: %v", err)
+	}
+}
+
+// --review on a lens file with no REVIEW section fails EARLY (before any runner work),
+// rather than silently skipping the half the user asked to preview.
+func TestLensTryReviewRequiresReviewSection(t *testing.T) {
+	seedTryStore(t, store.RunnerClaude)
+	// A valid EXTRACT but empty REVIEW section.
+	body := "# name: cand\n## EXTRACT\nmine growth\n## REVIEW\n"
+	err := cmdLensTry(writeLensFile(t, body), lensTryOpts{nSessions: 1, review: true})
+	if err == nil || !strings.Contains(err.Error(), "REVIEW section") {
+		t.Fatalf("--review with an empty REVIEW section should error early, got: %v", err)
 	}
 }
 

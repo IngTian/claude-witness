@@ -229,6 +229,57 @@ func TestPreviewMineTransportErrorSurfaces(t *testing.T) {
 	}
 }
 
+// TestPreviewReviewSynthesizesWithoutWriting: PreviewReview runs the REVIEW prompt over
+// a set of observations and returns the facets it would assert — writing NO facets.
+func TestPreviewReviewSynthesizesWithoutWriting(t *testing.T) {
+	s := newStore(t)
+	// Seed a couple of real facet rows so we can prove PreviewReview doesn't touch them.
+	facetsBefore := countFacets(t, s)
+
+	obs := []store.Observation{
+		{ID: "obs_1", Lens: "cand", Dimension: "thinking", Observation: "reasons by analogy", Poignancy: 5},
+		{ID: "obs_2", Lens: "cand", Dimension: "thinking", Observation: "reasons by analogy again", Poignancy: 4},
+	}
+	// A fake reviewer that returns one facet citing the fed observations.
+	reviewer := func(_ context.Context, _, _, _ string) (string, error) {
+		arr := []reviewedFacet{{Dimension: "thinking", Key: "analogical", Value: "leans analogical", Confidence: 0.7, BecauseOf: []string{"obs_1", "obs_2"}}}
+		b, _ := json.Marshal(arr)
+		return string(b), nil
+	}
+	facets, err := PreviewReview(context.Background(), reviewer, store.Config{}, previewLens(), obs, nil)
+	if err != nil {
+		t.Fatalf("PreviewReview: %v", err)
+	}
+	if len(facets) != 1 || facets[0].Key != "analogical" || len(facets[0].BecauseOf) != 2 {
+		t.Fatalf("expected one facet citing 2 obs, got %+v", facets)
+	}
+	if got := countFacets(t, s); got != facetsBefore {
+		t.Fatalf("PreviewReview WROTE facets: before=%d after=%d (must write nothing)", facetsBefore, got)
+	}
+}
+
+// TestPreviewReviewDriftSurfaces: a REVIEW reply with no JSON array is an error the
+// caller can surface (prose drift on the review model), not a silent empty.
+func TestPreviewReviewDriftSurfaces(t *testing.T) {
+	prose := func(_ context.Context, _, _, _ string) (string, error) {
+		return "The person seems thoughtful. (no JSON here)", nil
+	}
+	obs := []store.Observation{{ID: "o", Lens: "cand", Dimension: "thinking", Observation: "x", Poignancy: 3}}
+	_, err := PreviewReview(context.Background(), prose, store.Config{}, previewLens(), obs, nil)
+	if err == nil {
+		t.Fatalf("a no-array REVIEW reply should surface an error, not a silent empty facet set")
+	}
+}
+
+func countFacets(t *testing.T, s *store.Store) int {
+	t.Helper()
+	f, err := s.ReadFacets()
+	if err != nil {
+		t.Fatalf("ReadFacets: %v", err)
+	}
+	return len(f)
+}
+
 // countObs returns the total observation rows — the read-only assertion's ground truth.
 // ReadObservations("") reads across all lenses (the same all-lens read existing drain
 // tests use).
