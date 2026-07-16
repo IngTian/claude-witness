@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/IngTian/witness/internal/lens"
 	_ "github.com/IngTian/witness/internal/platform/claude" // register default platform for ForSession
+	opencodeplatform "github.com/IngTian/witness/internal/platform/opencode"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -78,20 +80,32 @@ func TestPreviewMineMinesWholeSessionIgnoringWatermark(t *testing.T) {
 		t.Fatalf("precondition: watermark should equal total (%d)", total)
 	}
 
-	var mined int
+	// The miner echoes its transcript into the observation text, and it captures the
+	// exact transcript(s) it was handed — so we can assert WHAT was mined, not just that
+	// SOMETHING was.
+	var minedInputs []string
 	miner := func(_ context.Context, _, _, input string) (string, error) {
-		mined++
+		minedInputs = append(minedInputs, input)
 		return obsReply(input), nil
 	}
 	obs, _, _, err := PreviewMine(context.Background(), miner, store.Config{}, s, session, previewLens())
 	if err != nil {
 		t.Fatalf("PreviewMine: %v", err)
 	}
-	if mined == 0 {
+	if len(minedInputs) == 0 {
 		t.Fatalf("preview did not mine an already-caught-up session (it must ignore the watermark)")
 	}
 	if len(obs) == 0 {
 		t.Fatalf("preview of a caught-up session returned no observations (previewed the empty delta)")
+	}
+	// The decisive assertion: the transcript handed to the miner must contain the LAST
+	// turn ("u2"). If PreviewMine had regressed to mining raw[done:] (done==total), the
+	// delta would be empty and the rendered transcript would NOT contain "u2" — so this
+	// fails under the exact regression the test guards, unlike a bare mined>0 check
+	// (an empty delta still renders one empty input on Claude, yielding a spurious obs).
+	joined := strings.Join(minedInputs, "\n")
+	if !strings.Contains(joined, "u2") {
+		t.Fatalf("preview did not mine the WHOLE session — last turn %q missing from mined transcript:\n%s", "u2", joined)
 	}
 }
 
@@ -129,6 +143,70 @@ func TestPreviewMineDriftRule(t *testing.T) {
 	}
 	if len(obs) != 0 {
 		t.Fatalf("empty array must yield zero obs, got %d", len(obs))
+	}
+}
+
+// TestPreviewMineMultiChunkAggregates: a session that renders to MULTIPLE chunks (an
+// OpenCode session under a small budget) must aggregate observations across ALL chunks
+// and report chunkCount>1. This exercises the multi-input loop that a single-chunk
+// Claude session never reaches.
+func TestPreviewMineMultiChunkAggregates(t *testing.T) {
+	defer opencodeplatform.SetChunkMaxCharsForTest(18)() // force several chunks
+	s := newStore(t)
+	session := "opencode:multi"
+	capture(t, s, session, "user", "alpha alpha alpha")
+	capture(t, s, session, "assistant", "beta beta beta")
+	capture(t, s, session, "user", "gamma gamma gamma")
+
+	miner := func(_ context.Context, _, _, input string) (string, error) { return obsReply(input), nil }
+	obs, chunks, drifted, err := PreviewMine(context.Background(), miner, store.Config{}, s, session, previewLens())
+	if err != nil {
+		t.Fatalf("PreviewMine: %v", err)
+	}
+	if chunks <= 1 {
+		t.Fatalf("expected the session to render to >1 chunk under an 18-char budget, got %d", chunks)
+	}
+	if len(obs) != chunks {
+		t.Fatalf("expected one obs per chunk (aggregated across all chunks): chunks=%d obs=%d", chunks, len(obs))
+	}
+	if drifted {
+		t.Fatalf("all chunks produced obs, so the lens must not be flagged as drifted")
+	}
+}
+
+// TestPreviewMineMultiChunkDriftRule: with several chunks where SOME drift but at least
+// one produces observations, the lens must NOT be flagged as drifted (the all-inputs
+// rule: drift only when zero obs across ALL chunks). This is the exact case a
+// single-chunk test can't reach.
+func TestPreviewMineMultiChunkDriftRule(t *testing.T) {
+	defer opencodeplatform.SetChunkMaxCharsForTest(18)()
+	s := newStore(t)
+	session := "opencode:mixed"
+	capture(t, s, session, "user", "alpha alpha alpha")
+	capture(t, s, session, "assistant", "beta beta beta")
+	capture(t, s, session, "user", "gamma gamma gamma")
+
+	// First chunk drifts (prose, no array); the rest extract fine.
+	var call int
+	miner := func(_ context.Context, _, _, input string) (string, error) {
+		call++
+		if call == 1 {
+			return "Here is some prose instead of JSON.", nil
+		}
+		return obsReply(input), nil
+	}
+	obs, chunks, drifted, err := PreviewMine(context.Background(), miner, store.Config{}, s, session, previewLens())
+	if err != nil {
+		t.Fatalf("PreviewMine: %v", err)
+	}
+	if chunks <= 1 {
+		t.Fatalf("expected >1 chunk, got %d", chunks)
+	}
+	if drifted {
+		t.Fatalf("a session where one chunk drifts but others produce obs must NOT be flagged drifted")
+	}
+	if len(obs) == 0 {
+		t.Fatalf("expected observations from the non-drifting chunks")
 	}
 }
 

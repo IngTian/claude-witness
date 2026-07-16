@@ -126,7 +126,7 @@ func LoadFromFileUnchecked(path string) (*Lens, error) {
 	l := parseLensFile(string(data))
 	if l.Name == "" {
 		base := filepath.Base(path)
-		l.Name = strings.TrimSuffix(base, filepath.Ext(base))
+		l.Name = strings.TrimSpace(strings.TrimSuffix(base, filepath.Ext(base)))
 	}
 	if l.Name == "" {
 		l.Name = "candidate"

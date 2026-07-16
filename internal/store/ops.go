@@ -132,11 +132,13 @@ func (s *Store) SampleSessions(n int) ([]string, error) {
 	return out, rows.Err()
 }
 
-// RawBytes is the total byte length of a session's raw text — the same size metric
-// SampleSessions orders by, exposed so a preview can show how large (and thus how
-// chunk-prone) a session is. Returns 0 for an unknown session (errors swallowed,
-// matching RawCount — a size readout is cosmetic).
-func (s *Store) RawBytes(session string) int64 {
+// RawChars is the total CHARACTER length of a session's raw text — the same size
+// metric SampleSessions orders by (SQLite LENGTH() counts characters, not bytes, so
+// this is chars, not bytes; the naming is deliberate to avoid the ~3× under-report a
+// "bytes" label would imply for multibyte/CJK transcripts). Exposed so a preview can
+// show how large (and thus how chunk-prone) a session is. Returns 0 for an unknown
+// session (errors swallowed, matching RawCount — a size readout is cosmetic).
+func (s *Store) RawChars(session string) int64 {
 	var n int64
 	_ = s.db.QueryRow(`SELECT COALESCE(SUM(LENGTH(text)), 0) FROM raw WHERE session = ?`, session).Scan(&n)
 	return n

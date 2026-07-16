@@ -36,6 +36,35 @@ func TestSampleSessionsSizeDescending(t *testing.T) {
 	}
 }
 
+// Equal-size sessions are ordered deterministically by the `, session` tie-break —
+// the property `witness lens try` relies on so v1-vs-v2 prompt runs compare the SAME
+// sessions. Without the tie-break, SQLite gives no order guarantee among ties.
+func TestSampleSessionsTieBreakDeterministic(t *testing.T) {
+	s := tempStore(t)
+	// Three sessions with IDENTICAL total size, inserted out of id order.
+	mustRaw(t, s, "ccc", "same-size")
+	mustRaw(t, s, "aaa", "same-size")
+	mustRaw(t, s, "bbb", "same-size")
+
+	got, err := s.SampleSessions(3)
+	if err != nil {
+		t.Fatalf("SampleSessions: %v", err)
+	}
+	want := []string{"aaa", "bbb", "ccc"} // size ties → ascending session id
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("tie-break order wrong: want %v, got %v", want, got)
+		}
+	}
+	// Stable across repeated calls (the whole point of determinism).
+	again, _ := s.SampleSessions(3)
+	for i := range got {
+		if got[i] != again[i] {
+			t.Fatalf("SampleSessions not stable across calls: %v vs %v", got, again)
+		}
+	}
+}
+
 // SampleSessions on an empty archive returns an empty slice, not an error.
 func TestSampleSessionsEmpty(t *testing.T) {
 	s := tempStore(t)
@@ -48,16 +77,16 @@ func TestSampleSessionsEmpty(t *testing.T) {
 	}
 }
 
-// RawBytes sums a session's text length; unknown session → 0.
-func TestRawBytes(t *testing.T) {
+// RawChars sums a session's text length; unknown session → 0.
+func TestRawChars(t *testing.T) {
 	s := tempStore(t)
 	mustRaw(t, s, "s1", "hello")  // 5
 	mustRaw(t, s, "s1", "world!") // 6 → total 11
-	if got := s.RawBytes("s1"); got != 11 {
-		t.Fatalf("RawBytes want 11, got %d", got)
+	if got := s.RawChars("s1"); got != 11 {
+		t.Fatalf("RawChars want 11, got %d", got)
 	}
-	if got := s.RawBytes("nope"); got != 0 {
-		t.Fatalf("RawBytes(unknown) want 0, got %d", got)
+	if got := s.RawChars("nope"); got != 0 {
+		t.Fatalf("RawChars(unknown) want 0, got %d", got)
 	}
 }
 

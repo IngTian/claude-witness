@@ -55,9 +55,10 @@ type lensTryObsJSON struct {
 type lensTrySessionJSON struct {
 	Session      string           `json:"session"`
 	RawTurns     int              `json:"raw_turns"`
-	RawBytes     int64            `json:"raw_bytes"`
+	RawChars     int64            `json:"raw_chars"` // SQLite LENGTH() = characters, not bytes
 	ChunkCount   int              `json:"chunk_count"`
 	Drifted      bool             `json:"drifted"`
+	Error        string           `json:"error,omitempty"` // set (and observations empty) if this session's mine failed
 	ElapsedMS    int64            `json:"elapsed_ms"`
 	Observations []lensTryObsJSON `json:"observations"`
 }
@@ -159,9 +160,9 @@ func lensTryRenderHuman(ctx context.Context, st *store.Store, cfg store.Config, 
 	total, driftedAny := 0, false
 	for _, sess := range sessions {
 		turns := st.RawCount(sess)
-		bytes := st.RawBytes(sess)
+		chars := st.RawChars(sess)
 		fmt.Printf("%s %s  %s\n", cyan("── session"), sess,
-			dim(fmt.Sprintf("(%d turns, %d chars) ──", turns, bytes)))
+			dim(fmt.Sprintf("(%d turns, %d chars) ──", turns, chars)))
 
 		start := time.Now()
 		obs, chunks, drifted, err := distill.PreviewMine(ctx, runFn, cfg, st, sess, ln)
@@ -210,18 +211,22 @@ func lensTryEmitJSON(ctx context.Context, st *store.Store, cfg store.Config, run
 		start := time.Now()
 		obs, chunks, drifted, err := distill.PreviewMine(ctx, runFn, cfg, st, sess, ln)
 		elapsed := time.Since(start)
-		if err != nil {
-			// Surface the error for this session but keep the array well-formed for diffing.
-			return fmt.Errorf("preview session %s: %w", sess, err)
-		}
 		sj := lensTrySessionJSON{
 			Session:      sess,
 			RawTurns:     st.RawCount(sess),
-			RawBytes:     st.RawBytes(sess),
+			RawChars:     st.RawChars(sess),
 			ChunkCount:   chunks,
 			Drifted:      drifted,
 			ElapsedMS:    elapsed.Milliseconds(),
 			Observations: []lensTryObsJSON{},
+		}
+		if err != nil {
+			// Report-and-continue, matching human mode: a transient error on one session
+			// records that session's error and still emits a well-formed array so the
+			// other sessions' previews aren't discarded (and a --json run stays diffable).
+			sj.Error = err.Error()
+			out.Sessions = append(out.Sessions, sj)
+			continue
 		}
 		for _, o := range obs {
 			sj.Observations = append(sj.Observations, lensTryObsJSON{
