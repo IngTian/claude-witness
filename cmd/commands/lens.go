@@ -79,7 +79,7 @@ func newLensCmd() *cobra.Command {
 // cmdLens manages the central, global lens registry. Lenses are defined once and
 // shared across every session (alongside the always-on "default" lens):
 //
-//	witness lens register <name> <file>   add/replace a lens definition
+//	witness lens register <name> <dir>    add/replace a lens definition
 //	witness lens deregister <name>        remove a lens definition
 //	witness lens enable <name>            run this lens on every session
 //	witness lens disable <name>           stop running it
@@ -91,12 +91,12 @@ func cmdLens(args []string) error {
 	}
 	defer st.Close()
 	if len(args) == 0 {
-		return fmt.Errorf("usage: witness lens <register <name> <file>|deregister <name>|enable <name>|disable <name>|list>")
+		return fmt.Errorf("usage: witness lens <register <name> <dir>|deregister <name>|enable <name>|disable <name>|list>")
 	}
 	switch args[0] {
 	case "register":
 		if len(args) < 3 {
-			return fmt.Errorf("usage: witness lens register <name> <file>")
+			return fmt.Errorf("usage: witness lens register <name> <dir>")
 		}
 		if err := st.RegisterLens(args[1], args[2]); err != nil {
 			return err
@@ -115,7 +115,7 @@ func cmdLens(args []string) error {
 			return fmt.Errorf("usage: witness lens enable <name>")
 		}
 		if !slices.Contains(st.RegisteredLenses(), args[1]) {
-			return fmt.Errorf("lens %q is not registered (run: witness lens register %s <file>)", args[1], args[1])
+			return fmt.Errorf("lens %q is not registered (run: witness lens register %s <dir>)", args[1], args[1])
 		}
 		if err := st.EnableLens(args[1]); err != nil {
 			return err
@@ -145,6 +145,18 @@ func cmdLens(args []string) error {
 			} else {
 				fmt.Printf("  %s %s  %s\n", dim("·"), name, dim("(registered, disabled)"))
 			}
+		}
+		// Loudly surface pre-#75 old-format lenses (only a lens.md, no extract.md): the
+		// format changed to a directory, so these silently dropped out of the registry on
+		// upgrade — a lens that was ENABLED simply stopped mining. Point at the fix (we do
+		// NOT auto-migrate; that would revive the parser #75 removed). `enabled` still lists
+		// the name, so flag whether the silent stop actually affected a running lens.
+		for _, name := range st.LegacyFormatLenses() {
+			hint := "OLD FORMAT (pre-#75) — re-register: witness lens register " + name + " <dir>"
+			if slices.Contains(enabled, name) {
+				hint = "OLD FORMAT (pre-#75), still ENABLED but NOT running — re-register: witness lens register " + name + " <dir>"
+			}
+			fmt.Printf("  %s %s  %s\n", yellow("!"), name, yellow(hint))
 		}
 	case "show":
 		if len(args) < 2 || args[1] == "" {
@@ -180,15 +192,15 @@ func cmdLens(args []string) error {
 // clear message rather than silently no-op.
 func lensBackfill(st *store.Store, name string, rebuild bool) error {
 	// Resolve the CLI arg to the name the WORKER actually keys data under. A
-	// registered lens's mined observations/facets/progress are tagged with the lens
-	// file's `# name:` header (lens.LoadRegistered), which can differ from the
-	// registry/CLI name the user typed. Operating on the CLI name would make
+	// registered lens's mined observations/facets/progress are tagged with the lens's
+	// resolved name (its lens.json `name`, via lens.LoadRegistered), which can differ
+	// from the registry/CLI name the user typed. Operating on the CLI name would make
 	// DeleteLensData/ResetLensWatermark match ZERO rows and silently "succeed" while
 	// the real data persists. So load the lens and use its resolved .Name.
 	minedName := name
 	if name != store.LensDefault {
 		if !slices.Contains(st.RegisteredLenses(), name) {
-			return fmt.Errorf("lens %q is not registered (run: witness lens register %s <file>)", name, name)
+			return notRegisteredErr(st, name)
 		}
 		if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
 			return fmt.Errorf("lens %q is registered but not enabled; enable it first (witness lens enable %s), or it won't be mined", name, name)
@@ -345,6 +357,17 @@ func modelOrGlobal(m string) string {
 	return m
 }
 
+// notRegisteredErr builds the "not registered" error, upgrading it to the actionable
+// re-register hint when the name is actually a pre-#75 OLD-FORMAT dir (a lone lens.md,
+// no extract.md) — so `lens show`/`lens backfill`, which gate on RegisteredLenses()
+// before touching the loader, don't bury an upgraded user in a generic message.
+func notRegisteredErr(st *store.Store, name string) error {
+	if slices.Contains(st.LegacyFormatLenses(), name) {
+		return fmt.Errorf("lens %q is in the old pre-#75 format (a single lens.md); the format changed to a directory of lens.json + extract.md + review.md — re-register it with `witness lens register %s <dir>`", name, name)
+	}
+	return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
+}
+
 // lensShow prints a lens's settings + its two prompts. Both a registered lens and the
 // built-in `default` render the same way (default's settings are hardcoded, not a
 // lens.json, but the view is identical), so the output is a consistent, copyable
@@ -359,7 +382,7 @@ func lensShow(st *store.Store, name string) error {
 		}
 	} else {
 		if !slices.Contains(st.RegisteredLenses(), name) {
-			return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
+			return notRegisteredErr(st, name)
 		}
 		l, err = lens.LoadRegistered(name, st.LensesDir())
 		if err != nil {

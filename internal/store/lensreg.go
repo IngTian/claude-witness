@@ -54,6 +54,12 @@ const (
 // extract.md (required — the mining prompt), and review.md (optional). srcDir is the
 // user's authored directory (issue #75: a lens is a directory, not one parsed file);
 // only the three known files are copied, so stray files in the source dir are ignored.
+//
+// It is lossless under SELF-REGISTER (srcDir == the registry dir, i.e. the user edited
+// the registered copy in place and re-registered it): ALL source files are read into
+// memory BEFORE anything is removed, so the wipe can't delete a not-yet-read source
+// file. And it stages into a sibling .tmp dir then atomically renames into place, so a
+// concurrent worker read never sees a half-built lens directory.
 func (s *Store) RegisterLens(name, srcDir string) error {
 	if ReservedLensName(name) {
 		return fmt.Errorf("lens name %q is reserved (the always-on built-in lens or the cross-lens summary); choose another name", name)
@@ -65,6 +71,8 @@ func (s *Store) RegisterLens(name, srcDir string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("lens source %q must be a directory holding %s + %s (+ optional %s); the single-file lens format was replaced (issue #75)", srcDir, lensExtractFile, lensReviewFile, lensConfigFile)
 	}
+	// Read EVERY source file into memory up front — before any destination mutation — so
+	// a self-register (srcDir == dest) can't lose review.md/lens.json to the wipe below.
 	extract, err := os.ReadFile(filepath.Join(srcDir, lensExtractFile))
 	if err != nil {
 		return fmt.Errorf("lens source is missing %s (the mining prompt): %w", lensExtractFile, err)
@@ -72,27 +80,39 @@ func (s *Store) RegisterLens(name, srcDir string) error {
 	if strings.TrimSpace(string(extract)) == "" {
 		return fmt.Errorf("lens source %s is empty (the mining prompt is required)", lensExtractFile)
 	}
-	dir := filepath.Join(s.LensesDir(), sanitize(name))
-	// Rebuild the destination from scratch so a re-register can't leave a stale file
-	// behind (e.g. an old review.md when the new source dropped it).
-	if err := os.RemoveAll(dir); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(dir, lensExtractFile), extract, 0o600); err != nil {
-		return err
-	}
-	// review.md and lens.json are optional; copy each only if present in the source.
-	for _, fn := range []string{lensReviewFile, lensConfigFile} {
+	files := map[string][]byte{lensExtractFile: extract}
+	for _, fn := range []string{lensReviewFile, lensConfigFile} { // both optional
 		if data, rerr := os.ReadFile(filepath.Join(srcDir, fn)); rerr == nil {
-			if err := os.WriteFile(filepath.Join(dir, fn), data, 0o600); err != nil {
-				return err
-			}
+			files[fn] = data
 		} else if !os.IsNotExist(rerr) {
 			return fmt.Errorf("read %s: %w", fn, rerr)
 		}
+	}
+	// Stage into a sibling .tmp dir, fully build it, then swap. Removing the target
+	// immediately before the rename means Rename lands on a non-existent path (atomic on
+	// POSIX and Windows), so a concurrent reader sees either the old dir or the new one —
+	// never a half-built one.
+	dir := filepath.Join(s.LensesDir(), sanitize(name))
+	tmp := dir + ".tmp"
+	if err := os.RemoveAll(tmp); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(tmp, 0o700); err != nil {
+		return err
+	}
+	for fn, data := range files {
+		if err := os.WriteFile(filepath.Join(tmp, fn), data, 0o600); err != nil {
+			_ = os.RemoveAll(tmp)
+			return err
+		}
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, dir); err != nil {
+		_ = os.RemoveAll(tmp)
+		return err
 	}
 	return nil
 }
@@ -117,6 +137,33 @@ func (s *Store) RegisteredLenses() []string {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(s.LensesDir(), e.Name(), lensExtractFile)); err == nil {
+			names = append(names, e.Name())
+		}
+	}
+	return names
+}
+
+// LegacyFormatLenses lists registry directories that hold the OLD single-file lens.md
+// (pre-#75) but NOT the new extract.md — i.e. lenses that a pre-#75 install registered
+// and that upgraded silently out of RegisteredLenses() (which now probes extract.md). A
+// user (especially one who had an ENABLED old-format lens) needs a loud, actionable
+// pointer to re-register, since we deliberately do NOT auto-migrate (parsing the old
+// ## EXTRACT/## REVIEW split is exactly what #75 removed). Returns nil when there are
+// none (the overwhelmingly common case), so callers can cheaply gate their warning.
+func (s *Store) LegacyFormatLenses() []string {
+	entries, err := os.ReadDir(s.LensesDir())
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(s.LensesDir(), e.Name())
+		_, newErr := os.Stat(filepath.Join(dir, lensExtractFile))
+		_, oldErr := os.Stat(filepath.Join(dir, "lens.md"))
+		if os.IsNotExist(newErr) && oldErr == nil {
 			names = append(names, e.Name())
 		}
 	}

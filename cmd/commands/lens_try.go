@@ -280,7 +280,7 @@ func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Con
 	for _, r := range results {
 		obs = append(obs, r.obs...)
 	}
-	rp = &reviewPreview{model: modelLabel(store.Config{TriageModel: cfg.DistillModel}), obsFed: len(obs)}
+	rp = &reviewPreview{model: modelLabel(distill.ModelFor(cfg, ln, distill.PhaseReview)), obsFed: len(obs)}
 	if len(obs) == 0 {
 		return rp // nothing mined → nothing to synthesize; not an error
 	}
@@ -392,13 +392,17 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 	return results
 }
 
-// modelLabel renders the effective triage model for display ("(runner default)" when
-// unset, so the reader knows which model produced the preview).
-func modelLabel(cfg store.Config) string {
-	if cfg.TriageModel == "" {
+// modelLabel renders a model name for display ("runner default" when unset, so the
+// reader knows which model produced the preview). It takes the ALREADY-RESOLVED model
+// (from distill.ModelFor), not the raw config, because a lens may mine/review on its own
+// per-lens model (#75) — labelling from cfg alone would report the global while the
+// preview actually ran on the per-lens model, hiding the exact variable a prompt-diff
+// run is testing.
+func modelLabel(model string) string {
+	if strings.TrimSpace(model) == "" {
 		return "runner default"
 	}
-	return cfg.TriageModel
+	return model
 }
 
 // lensTryRenderHuman prints the pre-computed results in SAMPLE ORDER (results[i] pairs
@@ -409,7 +413,7 @@ func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, candid
 	if candidate {
 		name += dim(" (candidate — file's name was reserved)")
 	}
-	fmt.Printf("%s %s   %s %s\n", label("lens"), bold(name), dim("extract model:"), modelLabel(cfg))
+	fmt.Printf("%s %s   %s %s\n", label("lens"), bold(name), dim("extract model:"), modelLabel(distill.ModelFor(cfg, ln, distill.PhaseExtract)))
 	fmt.Printf("%s previewing %d session(s), read-only — nothing is written\n\n", label("try"), len(sessions))
 
 	total, driftedAny := 0, false
@@ -518,7 +522,7 @@ func lensTryRenderReviewHuman(review *reviewPreview) {
 }
 
 func lensTryEmitJSON(st *store.Store, cfg store.Config, ln *lens.Lens, candidate bool, sessions []string, results []tryResult, review *reviewPreview) error {
-	out := lensTryJSON{Lens: ln.Name, Model: modelLabel(cfg), Candidate: candidate}
+	out := lensTryJSON{Lens: ln.Name, Model: modelLabel(distill.ModelFor(cfg, ln, distill.PhaseExtract)), Candidate: candidate}
 	for i, sess := range sessions {
 		r := results[i]
 		sj := lensTrySessionJSON{

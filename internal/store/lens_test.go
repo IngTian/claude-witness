@@ -118,6 +118,62 @@ func TestRegisterLensRebuildsDropsStaleFiles(t *testing.T) {
 	}
 }
 
+// SELF-REGISTER must be lossless: re-registering a lens FROM its own registry directory
+// (the "edit the registered copy in place, then re-register" workflow) must not lose
+// review.md/lens.json to the destination wipe. Regression for the audit finding where
+// RemoveAll ran before those optional files were read.
+func TestRegisterLensSelfRegisterIsLossless(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("math", writeLensSrcDir(t, "math", "mine", "rev")); err != nil {
+		t.Fatal(err)
+	}
+	regDir := filepath.Join(s.LensesDir(), "math")
+	// Set a per-lens model so lens.json carries state worth preserving.
+	if err := s.SetLensModel("math", "extract", "openai/gpt-5.5-mini"); err != nil {
+		t.Fatal(err)
+	}
+	// Re-register FROM the registry dir itself (srcDir == dest).
+	if err := s.RegisterLens("math", regDir); err != nil {
+		t.Fatalf("self-register: %v", err)
+	}
+	for _, fn := range []string{"extract.md", "review.md", "lens.json"} {
+		if _, err := os.Stat(filepath.Join(regDir, fn)); err != nil {
+			t.Fatalf("self-register lost %s: %v", fn, err)
+		}
+	}
+	data, _ := os.ReadFile(filepath.Join(regDir, "lens.json"))
+	if !strings.Contains(string(data), "openai/gpt-5.5-mini") {
+		t.Fatalf("self-register lost the per-lens model in lens.json:\n%s", string(data))
+	}
+}
+
+// LegacyFormatLenses surfaces pre-#75 dirs (a lone lens.md, no extract.md) so an
+// upgraded user isn't silently dropped. A new-format lens must NOT be flagged.
+func TestLegacyFormatLenses(t *testing.T) {
+	s := tempStore(t)
+	// A new-format lens (has extract.md) — must NOT be flagged.
+	if err := s.RegisterLens("newfmt", writeLensSrcDir(t, "newfmt", "mine", "rev")); err != nil {
+		t.Fatal(err)
+	}
+	// An old-format dir: only lens.md, no extract.md.
+	oldDir := filepath.Join(s.LensesDir(), "oldfmt")
+	if err := os.MkdirAll(oldDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "lens.md"),
+		[]byte("# name: oldfmt\n## EXTRACT\nmine\n## REVIEW\nrev\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got := s.LegacyFormatLenses()
+	if len(got) != 1 || got[0] != "oldfmt" {
+		t.Fatalf("want [oldfmt] flagged as legacy, got %v", got)
+	}
+	// The old-format dir must ALSO be absent from RegisteredLenses (it has no extract.md).
+	if slices.Contains(s.RegisteredLenses(), "oldfmt") {
+		t.Fatalf("an old-format dir must not appear in RegisteredLenses")
+	}
+}
+
 // SetLensModel round-trips per-lens models through lens.json without touching prompts,
 // and an empty value clears the field (the lens rides the global again).
 func TestSetLensModelRoundTrip(t *testing.T) {

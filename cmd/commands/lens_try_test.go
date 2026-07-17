@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/IngTian/witness/internal/distill"
+	"github.com/IngTian/witness/internal/lens"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -159,6 +161,33 @@ func TestLensTryReviewDriftMessage(t *testing.T) {
 	})
 	if !strings.Contains(out, "prose drift") || !strings.Contains(out, "--review-model") {
 		t.Fatalf("drift should render distinctly with actionable guidance, got:\n%s", out)
+	}
+}
+
+// The lens try model label must reflect the RESOLVED per-lens model, not the raw global
+// (#75 audit): a registered lens with its own extract_model, previewed with NO --model
+// flag, MINES on the per-lens model, so the reported model must be that per-lens one —
+// else a prompt-diff run hides the exact variable under test. Drives lensTryEmitJSON.
+func TestLensTryReportsResolvedPerLensModel(t *testing.T) {
+	t.Setenv("WITNESS_HOME", t.TempDir())
+	s, err := store.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	cfg := store.Config{TriageModel: "global-triage"}
+	ln := &lens.Lens{Name: "codereview", Extract: "mine", ExtractModel: "per-lens-cheap"}
+	out := captureStdout(t, func() {
+		if err := lensTryEmitJSON(s, cfg, ln, false, nil, nil, nil); err != nil {
+			t.Fatalf("lensTryEmitJSON: %v", err)
+		}
+	})
+	var got lensTryJSON
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("parse JSON: %v\n%s", err, out)
+	}
+	if got.Model != "per-lens-cheap" {
+		t.Fatalf("model label must be the resolved per-lens model, got %q (global was global-triage)", got.Model)
 	}
 }
 
