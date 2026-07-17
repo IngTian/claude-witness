@@ -139,11 +139,12 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	}
 	defer st.Close()
 
-	// The arg is a lens FILE path, or the NAME of an already-registered lens — the
-	// convenience so you can `lens try codereview` (re-preview a registered lens's own
-	// definition) without knowing its on-disk path. A registered name wins over a
-	// same-named file in cwd: names have no path separators/extension, so the ambiguity
-	// is negligible, and "I typed my lens's name" is the overwhelmingly likely intent.
+	// The arg is a lens DIRECTORY path (holding lens.json + extract.md + review.md), or
+	// the NAME of an already-registered lens — the convenience so you can `lens try
+	// codereview` (re-preview a registered lens's own definition) without knowing its
+	// on-disk path. A registered name wins over a same-named dir in cwd: names have no
+	// path separators/extension, so the ambiguity is negligible, and "I typed my lens's
+	// name" is the overwhelmingly likely intent.
 	path := file
 	if resolved, ok := registeredLensPath(st, file); ok {
 		path = resolved
@@ -153,13 +154,13 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// lenient loader (preview never writes, so an impersonating name is harmless) and
 	// mark it so the display makes the fallback obvious.
 	candidate := false
-	ln, err := lens.LoadFromFile(path)
+	ln, err := lens.LoadFromDir(path)
 	if err != nil {
 		var uErr error
-		if ln, uErr = lens.LoadFromFileUnchecked(path); uErr != nil {
-			return uErr // a genuine load error (missing file / no EXTRACT) — surface it
+		if ln, uErr = lens.LoadFromDirUnchecked(path); uErr != nil {
+			return uErr // a genuine load error (missing dir / no extract.md) — surface it
 		}
-		// LoadFromFileUnchecked succeeded where LoadFromFile failed => reserved name.
+		// LoadFromDirUnchecked succeeded where LoadFromDir failed => reserved name.
 		ln.Name = "candidate"
 		candidate = true
 	}
@@ -175,8 +176,15 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// starts `opencode serve` prewarming cfg.TriageModel + cfg.DistillModel, so a later
 	// override would silently not reach the server. --model overrides EXTRACT (triage);
 	// --review-model overrides REVIEW (distill) — the two engine stages use two models.
+	//
+	// Apply the override onto BOTH cfg (so OpenCode prewarms the right model) AND the
+	// lens's own per-lens model fields (#75): distill.ModelFor prefers a lens's
+	// ExtractModel/ReviewModel over the global, so overriding only cfg would let a
+	// registered lens's own per-lens model shadow the explicit --model the user asked to
+	// preview ON. Explicit --model is the user's stated preview intent and must win.
 	if opts.model != "" {
 		cfg.TriageModel = opts.model
+		ln.ExtractModel = opts.model
 	}
 	// Only apply --review-model when review actually runs. Otherwise, on an OpenCode
 	// runner, Open validates cfg.DistillModel up front and a bad --review-model would
@@ -184,6 +192,7 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	// silently ignored) — a confusing runner-dependent side effect for a review-only knob.
 	if opts.review && opts.reviewModel != "" {
 		cfg.DistillModel = opts.reviewModel
+		ln.ReviewModel = opts.reviewModel
 	}
 
 	// Resolve the session set (validation happens BEFORE any runner work, so a bad file/
@@ -271,7 +280,7 @@ func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Con
 	for _, r := range results {
 		obs = append(obs, r.obs...)
 	}
-	rp = &reviewPreview{model: modelLabel(store.Config{TriageModel: cfg.DistillModel}), obsFed: len(obs)}
+	rp = &reviewPreview{model: modelLabel(distill.ModelFor(cfg, ln, distill.PhaseReview)), obsFed: len(obs)}
 	if len(obs) == 0 {
 		return rp // nothing mined → nothing to synthesize; not an error
 	}
@@ -294,13 +303,14 @@ func runReviewPreview(ctx context.Context, runFn distill.MineFunc, cfg store.Con
 	return rp
 }
 
-// registeredLensPath maps a `lens try` arg to the on-disk lens.md of a registered lens
+// registeredLensPath maps a `lens try` arg to the on-disk DIRECTORY of a registered lens
 // when the arg is one of that lens's registered NAMES — the convenience that lets a user
 // `lens try codereview` instead of typing the archive path. It matches only a name with
-// no path separator or extension (so an actual "./foo.md" or "dir/lens.md" always stays
-// a file path), and only when that name is in RegisteredLenses. Returns ok=false to fall
-// through to file-path handling. `default` isn't in RegisteredLenses (it's the built-in),
-// so `lens try default` stays a file arg — previewing the built-in isn't the point here.
+// no path separator or extension (so an actual "./foo" or "dir/lens" always stays a
+// directory path the user typed), and only when that name is in RegisteredLenses. Returns
+// ok=false to fall through to path handling. `default` isn't in RegisteredLenses (it's the
+// built-in), so `lens try default` stays a path arg — previewing the built-in isn't the
+// point here.
 func registeredLensPath(st *store.Store, arg string) (string, bool) {
 	if strings.ContainsRune(arg, filepath.Separator) || strings.Contains(arg, "/") || filepath.Ext(arg) != "" {
 		return "", false
@@ -308,7 +318,7 @@ func registeredLensPath(st *store.Store, arg string) (string, bool) {
 	if !slices.Contains(st.RegisteredLenses(), arg) {
 		return "", false
 	}
-	return filepath.Join(st.LensesDir(), arg, "lens.md"), true
+	return filepath.Join(st.LensesDir(), arg), true
 }
 
 // resolveTrySessions picks the sessions to preview: one specific --session (validated
@@ -382,13 +392,17 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 	return results
 }
 
-// modelLabel renders the effective triage model for display ("(runner default)" when
-// unset, so the reader knows which model produced the preview).
-func modelLabel(cfg store.Config) string {
-	if cfg.TriageModel == "" {
+// modelLabel renders a model name for display ("runner default" when unset, so the
+// reader knows which model produced the preview). It takes the ALREADY-RESOLVED model
+// (from distill.ModelFor), not the raw config, because a lens may mine/review on its own
+// per-lens model (#75) — labelling from cfg alone would report the global while the
+// preview actually ran on the per-lens model, hiding the exact variable a prompt-diff
+// run is testing.
+func modelLabel(model string) string {
+	if strings.TrimSpace(model) == "" {
 		return "runner default"
 	}
-	return cfg.TriageModel
+	return model
 }
 
 // lensTryRenderHuman prints the pre-computed results in SAMPLE ORDER (results[i] pairs
@@ -399,7 +413,7 @@ func lensTryRenderHuman(st *store.Store, cfg store.Config, ln *lens.Lens, candid
 	if candidate {
 		name += dim(" (candidate — file's name was reserved)")
 	}
-	fmt.Printf("%s %s   %s %s\n", label("lens"), bold(name), dim("extract model:"), modelLabel(cfg))
+	fmt.Printf("%s %s   %s %s\n", label("lens"), bold(name), dim("extract model:"), modelLabel(distill.ModelFor(cfg, ln, distill.PhaseExtract)))
 	fmt.Printf("%s previewing %d session(s), read-only — nothing is written\n\n", label("try"), len(sessions))
 
 	total, driftedAny := 0, false
@@ -508,7 +522,7 @@ func lensTryRenderReviewHuman(review *reviewPreview) {
 }
 
 func lensTryEmitJSON(st *store.Store, cfg store.Config, ln *lens.Lens, candidate bool, sessions []string, results []tryResult, review *reviewPreview) error {
-	out := lensTryJSON{Lens: ln.Name, Model: modelLabel(cfg), Candidate: candidate}
+	out := lensTryJSON{Lens: ln.Name, Model: modelLabel(distill.ModelFor(cfg, ln, distill.PhaseExtract)), Candidate: candidate}
 	for i, sess := range sessions {
 		r := results[i]
 		sj := lensTrySessionJSON{
