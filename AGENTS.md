@@ -63,9 +63,9 @@ self-copy with `os.SameFile` + writes atomically via temp+rename.)
   Rows are namespaced by session id (OpenCode uses an `opencode:` prefix); meta
   keys are namespaced (`opencode_*` vs CC's `worker_*`/`review_*`). Neither can
   corrupt the other's data.
-- **Runners are resolved from the enabled-lens set (still global, never
-  repo-scoped).** A global `runner` (in `config.toml`, bound by `witness install
-  <target>`) distills every session by default, but a lens may declare its own
+- **Runners are resolved from the enabled-lens set (process-wide, never
+  repo-scoped).** A **default** `runner` (in `config.toml`, bound by `witness install
+  <target>`) distills every session unless overridden, but a lens may declare its own
   `runner` in its `lens.json` (#75 slice 2) — so one drain can span both Claude
   and OpenCode, each lens routed to its runtime. The set of runtimes to open is
   derived from the active lenses (`cmd/commands/runnerset.go`), never from a repo.

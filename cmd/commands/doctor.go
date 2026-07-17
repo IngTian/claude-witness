@@ -57,16 +57,16 @@ func cmdDoctor(asJSON bool) error {
 	var deferredErr error
 	runnerCmd := "unknown"
 	modelStatus := "unknown"
-	globalRunner, rerr := platform.RunnerFor(st, cfg)
+	defaultRunner, rerr := platform.RunnerFor(st, cfg)
 	if rerr != nil {
 		modelStatus = "INVALID: " + rerr.Error()
 		deferredErr = rerr
 	} else {
-		runnerCmd = globalRunner.InvocationHint()
-		// Validate each RUNTIME's models against ITS OWN runner (#75 slice 2): the global
-		// stage models on the global runner, and every per-lens model on the runtime that
+		runnerCmd = defaultRunner.InvocationHint()
+		// Validate each RUNTIME's models against ITS OWN runner (#75 slice 2): the default
+		// stage models on the default runner, and every per-lens model on the runtime that
 		// lens routes to. A per-lens OpenCode model must be checked by the OpenCode runner,
-		// not the global (Claude) one — validating it against the wrong runtime would either
+		// not the default (Claude) one — validating it against the wrong runtime would either
 		// falsely pass (Claude's no-op) or falsely fail. So we mint one runner per runtime
 		// the active lenses use and validate that runtime's model set. A bad per-lens model
 		// otherwise only surfaces late as a per-lens mining backoff. (On Claude ValidateModels
@@ -156,9 +156,10 @@ func cmdDoctor(asJSON bool) error {
 	fmt.Printf("%s  %s\n", overall, bold("witness doctor"))
 	fmt.Printf("   %s %s\n", dim("data root:"), st.Root)
 
-	// Runner block. The runner is GLOBAL: one process distills every session
-	// regardless of source (Claude Code and OpenCode both feed the same L0), so
-	// make the active backend, its models, and how to change them explicit —
+	// Runner block. This is the DEFAULT runner: one process distills every session
+	// regardless of source (Claude Code and OpenCode both feed the same L0), and it
+	// serves every lens that doesn't override it. So make the active backend, its
+	// models, and how to change them explicit —
 	// otherwise a user who installed both is left guessing which LLM mines their
 	// sessions. runnerCmd is the runner's own invocation hint (set above); empty
 	// models mean "let the runner pick its environment default".
@@ -281,10 +282,10 @@ type doctorEmbedderJSON struct {
 
 // validateRuntimeModels validates every runtime's models against ITS OWN runner (#75
 // slice 2). It partitions the models by the runtime that will actually use them — the
-// global stage models on the global runner, each per-lens model on the runtime its lens
+// default stage models on the default runner, each per-lens model on the runtime its lens
 // routes to — then mints each runtime's runner and calls its ValidateModels with that
 // runtime's set. This is why a per-lens OpenCode model gets checked by `opencode models`
-// and not the global (Claude) runner. Returns the first runtime's validation error (with
+// and not the default (Claude) runner. Returns the first runtime's validation error (with
 // the runtime named) so doctor's single model line stays meaningful.
 func validateRuntimeModels(ctx context.Context, st *store.Store, cfg store.Config) error {
 	// runtime name → deduped non-empty models to validate on it.
@@ -299,10 +300,10 @@ func validateRuntimeModels(ctx context.Context, st *store.Store, cfg store.Confi
 		}
 		perRuntime[runtime][m] = true
 	}
-	globalRunner := strings.TrimSpace(cfg.Runner)
-	// Global stage models belong to the global runner.
-	add(globalRunner, cfg.TriageModel)
-	add(globalRunner, cfg.DistillModel)
+	defaultRunner := strings.TrimSpace(cfg.Runner)
+	// Default stage models belong to the default runner.
+	add(defaultRunner, cfg.TriageModel)
+	add(defaultRunner, cfg.DistillModel)
 	// Each lens's per-lens models belong to the runtime the lens routes to.
 	if lenses, err := activeLenses(st); err == nil {
 		for _, l := range lenses {
@@ -311,10 +312,10 @@ func validateRuntimeModels(ctx context.Context, st *store.Store, cfg store.Confi
 			add(rt, l.ReviewModel)
 		}
 	}
-	// Ensure the global runner is validated even with no models (it mints + is the report's
-	// InvocationHint source; an unknown global name is a real config error).
-	if _, ok := perRuntime[globalRunner]; !ok {
-		perRuntime[globalRunner] = map[string]bool{}
+	// Ensure the default runner is validated even with no models (it mints + is the report's
+	// InvocationHint source; an unknown default-runner name is a real config error).
+	if _, ok := perRuntime[defaultRunner]; !ok {
+		perRuntime[defaultRunner] = map[string]bool{}
 	}
 	for runtime, set := range perRuntime {
 		runner, err := platform.RunnerForName(runtime, cfg)

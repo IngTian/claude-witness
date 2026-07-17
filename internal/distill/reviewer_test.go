@@ -35,7 +35,7 @@ func facetReply(dimension, key, value string) string {
 }
 
 // Reviewer.reviewLens must DISPATCH each lens to its per-lens runner (#75 slice 2), not
-// just to the global Runner. Guards the runnerFor seam: fails if reviewLens is reverted to
+// just to the default Runner. Guards the runnerFor seam: fails if reviewLens is reverted to
 // call r.Runner directly.
 func TestReviewerRoutesReviewToPerLensRunner(t *testing.T) {
 	s := newStore(t)
@@ -56,19 +56,19 @@ func TestReviewerRoutesReviewToPerLensRunner(t *testing.T) {
 			{Name: "cr", Review: "REVIEW-cr", Runner: "opencode"},
 		},
 		Config: store.Config{Runner: "claude"},
-		Runner: tag("global"),
+		Runner: tag("default"),
 		RunnerFor: func(ln *lens.Lens) MineFunc {
 			if ln != nil && ln.Runner == "opencode" {
 				return tag("opencode")
 			}
-			return nil // fall back to Runner (global)
+			return nil // fall back to Runner (default)
 		},
 	}
 	if err := r.Run(context.Background(), time.Now()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if reviewedBy["REVIEW-default"] != "global" {
-		t.Fatalf("default lens must review on the global runner, got %q", reviewedBy["REVIEW-default"])
+	if reviewedBy["REVIEW-default"] != "default" {
+		t.Fatalf("default lens must review on the default runner, got %q", reviewedBy["REVIEW-default"])
 	}
 	if reviewedBy["REVIEW-cr"] != "opencode" {
 		t.Fatalf("a lens with runner=opencode must review on the opencode runner, got %q", reviewedBy["REVIEW-cr"])

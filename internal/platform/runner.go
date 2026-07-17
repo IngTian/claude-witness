@@ -7,7 +7,7 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// Runner is the GLOBAL distillation-engine lifecycle: one engine drains every
+// Runner is the default distillation-engine lifecycle: one engine drains every
 // pending session regardless of which platform produced it. It is the whole of
 // what the engine (internal/distill) knows about a runtime — distill calls Run and
 // never learns whether that shells to `claude -p` or talks to `opencode serve`.
@@ -76,7 +76,7 @@ func RunnerSweepsOnClose(r Runner) bool {
 	return ok && s.SweepsOnClose()
 }
 
-// RunnerFor resolves the GLOBAL runner for a drain. It applies the store's runner
+// RunnerFor resolves the default runner for a drain. It applies the store's runner
 // precedence (bound-meta > config line > WITNESS_RUNNER env > default — unchanged)
 // to get ONE name, then mints that platform's Runner. Fails closed on an unknown
 // name so a typo surfaces instead of silently defaulting.

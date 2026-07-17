@@ -79,7 +79,7 @@ func forceReview(st *store.Store) (bool, error) {
 		return false, err
 	}
 	defer rs.Close()
-	runFn := rs.RunFor(nil) // the global runner (unified summary + default fallback)
+	runFn := rs.RunFor(nil) // the default runner (unified summary + default fallback)
 	r := &distill.Reviewer{Store: st, Lenses: lenses, Config: cfg, Runner: runFn, RunnerFor: rs.RunFor}
 	if err := r.Run(ctx, time.Now()); err != nil {
 		return false, err

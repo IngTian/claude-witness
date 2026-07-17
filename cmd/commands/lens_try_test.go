@@ -164,7 +164,7 @@ func TestLensTryReviewDriftMessage(t *testing.T) {
 	}
 }
 
-// The lens try model label must reflect the RESOLVED per-lens model, not the raw global
+// The lens try model label must reflect the RESOLVED per-lens model, not the raw default
 // (#75 audit): a registered lens with its own extract_model, previewed with NO --model
 // flag, MINES on the per-lens model, so the reported model must be that per-lens one —
 // else a prompt-diff run hides the exact variable under test. Drives lensTryEmitJSON.
@@ -175,7 +175,7 @@ func TestLensTryReportsResolvedPerLensModel(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer s.Close()
-	cfg := store.Config{TriageModel: "global-triage"}
+	cfg := store.Config{TriageModel: "default-triage"}
 	ln := &lens.Lens{Name: "codereview", Extract: "mine", ExtractModel: "per-lens-cheap"}
 	out := captureStdout(t, func() {
 		if err := lensTryEmitJSON(s, cfg, ln, false, nil, nil, nil); err != nil {
@@ -187,7 +187,7 @@ func TestLensTryReportsResolvedPerLensModel(t *testing.T) {
 		t.Fatalf("parse JSON: %v\n%s", err, out)
 	}
 	if got.Model != "per-lens-cheap" {
-		t.Fatalf("model label must be the resolved per-lens model, got %q (global was global-triage)", got.Model)
+		t.Fatalf("model label must be the resolved per-lens model, got %q (default was default-triage)", got.Model)
 	}
 }
 
@@ -328,12 +328,12 @@ func TestRunPreviewsPanicIsolated(t *testing.T) {
 	}
 }
 
-// tryRunnerCfg must, for a lens on a DIFFERENT runner than the global, both point cfg at
-// the lens's runner AND clear the wrong-runtime global models — else `lens try` on a
-// cross-runtime lens hands a global (e.g. claude) model name to the other runtime's Open
-// and aborts the preview (the slice-2 audit bug). A same-runtime lens keeps the globals.
-func TestTryRunnerCfgClearsCrossRuntimeGlobals(t *testing.T) {
-	// global=claude with a claude triage/distill model set; lens routes to opencode.
+// tryRunnerCfg must, for a lens on a DIFFERENT runner than the default, both point cfg at
+// the lens's runner AND clear the wrong-runtime default models — else `lens try` on a
+// cross-runtime lens hands a default (e.g. claude) model name to the other runtime's Open
+// and aborts the preview (the slice-2 audit bug). A same-runtime lens keeps the defaults.
+func TestTryRunnerCfgClearsCrossRuntimeDefaults(t *testing.T) {
+	// default=claude with a claude triage/distill model set; lens routes to opencode.
 	cfg := store.Config{Runner: "claude", TriageModel: "claude-sonnet", DistillModel: "claude-opus"}
 	cross := &lens.Lens{Name: "cr", Runner: "opencode"}
 	got := tryRunnerCfg(cfg, cross)
@@ -341,21 +341,21 @@ func TestTryRunnerCfgClearsCrossRuntimeGlobals(t *testing.T) {
 		t.Fatalf("cross-runtime lens must preview on its own runner, got %q", got.Runner)
 	}
 	if got.TriageModel != "" || got.DistillModel != "" {
-		t.Fatalf("wrong-runtime global models must be cleared, got triage=%q distill=%q", got.TriageModel, got.DistillModel)
+		t.Fatalf("wrong-runtime default models must be cleared, got triage=%q distill=%q", got.TriageModel, got.DistillModel)
 	}
-	// And ModelFor then falls back to the runtime default (""), not the claude global.
+	// And ModelFor then falls back to the runtime default (""), not the claude default.
 	if m := distill.ModelFor(got, cross, distill.PhaseExtract); m != "" {
 		t.Fatalf("cross-runtime lens with no per-lens model must ride the runtime default, got %q", m)
 	}
 
-	// A lens on the SAME runner as the global keeps the globals (no clearing).
-	same := &lens.Lens{Name: "s"} // no runner → global
+	// A lens on the SAME runner as the default keeps the defaults (no clearing).
+	same := &lens.Lens{Name: "s"} // no runner → default
 	got2 := tryRunnerCfg(cfg, same)
 	if got2.Runner != "claude" || got2.TriageModel != "claude-sonnet" {
-		t.Fatalf("same-runtime lens must keep the global runner+models, got runner=%q triage=%q", got2.Runner, got2.TriageModel)
+		t.Fatalf("same-runtime lens must keep the default runner+models, got runner=%q triage=%q", got2.Runner, got2.TriageModel)
 	}
 
-	// A cross-runtime lens WITH its own per-lens model keeps that model (globals still cleared,
+	// A cross-runtime lens WITH its own per-lens model keeps that model (defaults still cleared,
 	// but ModelFor uses the per-lens one).
 	tuned := &lens.Lens{Name: "t", Runner: "opencode", ExtractModel: "opencode/free"}
 	got3 := tryRunnerCfg(cfg, tuned)

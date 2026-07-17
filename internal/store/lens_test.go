@@ -264,7 +264,7 @@ func TestMigrateLegacyLensesSkipsUnconvertible(t *testing.T) {
 }
 
 // SetLensModel round-trips per-lens models through lens.json without touching prompts,
-// and an empty value clears the field (the lens rides the global again).
+// and an empty value clears the field (the lens rides the default again).
 func TestSetLensModelRoundTrip(t *testing.T) {
 	s := tempStore(t)
 	if err := s.RegisterLens("math", writeLensSrcDir(t, "math", "mine", "rev")); err != nil {
@@ -306,7 +306,7 @@ func TestSetLensModelRoundTrip(t *testing.T) {
 }
 
 // SetLensRunner round-trips the per-lens runner through lens.json (#75 slice 2) without
-// touching prompts or other fields, and an empty value clears it (ride the global runner).
+// touching prompts or other fields, and an empty value clears it (ride the default runner).
 func TestSetLensRunnerRoundTrip(t *testing.T) {
 	s := tempStore(t)
 	if err := s.RegisterLens("cr", writeLensSrcDir(t, "cr", "mine", "rev")); err != nil {

@@ -27,7 +27,7 @@ func newConfigCmd() *cobra.Command {
 		Short: "Get or set distillation config (runner, models).",
 		Long: "Get or set the string config.toml knobs that control the distillation backend, without hand-editing the file:\n\n" +
 			configKeyHelp() +
-			"\n\nThe runner is GLOBAL — one backend distills every session and every lens; there is no per-lens model today. A lens that needs a strong model just means: point the global runner at a capable one.",
+			"\n\nThe runner set here is the DEFAULT — one backend distills every session and every lens unless a lens overrides it. A lens may declare its own `runner`/`extract_model`/`review_model` (see `witness lens set`); anything it leaves unset rides these defaults.",
 	}
 	c.AddCommand(
 		&cobra.Command{

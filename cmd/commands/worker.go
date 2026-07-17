@@ -132,7 +132,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	}
 
 	cfg := st.LoadConfig()
-	// Resolve the effective GLOBAL runner ONCE and overwrite cfg.Runner: it is the runtime
+	// Resolve the effective default runner ONCE and overwrite cfg.Runner: it is the runtime
 	// a lens with no explicit `# runner` rides, and the target the per-lens router
 	// (distill.RunnerFor) compares against. This is what lets an npm OpenCode user — who
 	// never ran `install`, so config says the default "claude" — distill via OpenCode:
@@ -168,11 +168,11 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		return p
 	}
 	// Resolve the SET of distillation runners the active lenses need and, if there's work,
-	// Open each for the whole drain (issue #75 slice 2). Slice 1 opened one global runner;
+	// Open each for the whole drain (issue #75 slice 2). Slice 1 opened one default runner;
 	// now a lens may route to its own runtime, so the drain opens every distinct runtime
-	// (OpenCode: one `opencode serve` + a pre-cleanup sweep; Claude: no-op). A non-global
+	// (OpenCode: one `opencode serve` + a pre-cleanup sweep; Claude: no-op). A non-default
 	// runtime whose Open fails is circuit-broken (its lenses back off) rather than failing
-	// the whole drain; only the GLOBAL runner failing is fatal (see newRunnerSet). The
+	// the whole drain; only the default runner failing is fatal (see newRunnerSet). The
 	// combined Close tears every opened runner down + runs each one's post-cleanup sweep.
 	// The runner set is opened LAZILY on first actual need (ensureRunners), not merely
 	// from a pre-loop hasPending snapshot. `capture` writes L0 without WorkerLock, so work
@@ -198,7 +198,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		}
 		return rs != nil
 	}
-	// runFn is the GLOBAL runner's MineFunc — used by the reviewer's/summarizer's unified
+	// runFn is the default runner's MineFunc — used by the reviewer's/summarizer's unified
 	// pass and as the Worker's default Run; per-lens routing goes through rs.RunFor. It is
 	// only reached after ensureRunners() opened the set (the drain/review gates below), so
 	// rs is non-nil here; the guard is a belt-and-suspenders against a misroute.
@@ -244,7 +244,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 	getMiner := func() *distill.Worker {
 		if miner == nil {
 			// Open the runner set before mining — closes the "work arrived after the pre-loop
-			// snapshot, rs still nil" gap. A failed open (fatal global) means we can't mine
+			// snapshot, rs still nil" gap. A failed open (fatal default) means we can't mine
 			// this run; return nil so the loop breaks and the next wakeup retries.
 			if !ensureRunners() {
 				return nil
@@ -291,7 +291,7 @@ func runWorkerInRange(auto bool, timeRange sessionTimeRange) (bool, error) {
 		reviewDue:     func() bool { return st.ReviewDue(cfg) },
 		runReview: func() {
 			// Review also needs the runner set (its own per-lens routing + the unified
-			// summary's global runner). Open it here so a review-only run (no mining) still
+			// summary's default runner). Open it here so a review-only run (no mining) still
 			// has live runners; a failed open skips the review this pass.
 			if !ensureRunners() {
 				return

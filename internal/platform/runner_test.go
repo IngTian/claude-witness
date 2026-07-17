@@ -9,7 +9,7 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// RunnerFor resolves the global runner by cfg (fail-closed on an unknown name) and
+// RunnerFor resolves the default runner by cfg (fail-closed on an unknown name) and
 // tolerates Close on an unopened runner (no work this drain).
 func TestRunnerFor(t *testing.T) {
 	t.Setenv("WITNESS_HOME", t.TempDir())

@@ -12,7 +12,7 @@ import (
 )
 
 // runnerSet is the per-lens-runner lifecycle for one drain (issue #75 slice 2). Slice 1
-// opened ONE global runner; a lens may now declare its own runtime, so a drain opens the
+// opened ONE default runner; a lens may now declare its own runtime, so a drain opens the
 // SET of runners the active lenses actually need — each ONCE, lazily, under the worker's
 // single WorkerLock. It hands the engine a per-lens resolver (RunFor) so mine/review pick
 // the right runner, and a combined Close that tears every opened runner down.
@@ -24,9 +24,9 @@ import (
 // instead of N identical Open attempts. Lenses on a healthy runtime commit normally. This
 // is the "an OpenCode outage doesn't touch Claude lenses" isolation.
 type runnerSet struct {
-	cfg     store.Config
-	byName  map[string]*openedRunner // runtime name → lazily-opened runner (or a broken marker)
-	globalR string                   // the resolved global runner name (the "" / default routing target)
+	cfg      store.Config
+	byName   map[string]*openedRunner // runtime name → lazily-opened runner (or a broken marker)
+	defaultR string                   // the resolved default runner name (the "" / default routing target)
 }
 
 type openedRunner struct {
@@ -39,43 +39,43 @@ type openedRunner struct {
 // (once). ctx threads to each Open (so SIGTERM tears them down). It never returns a fatal
 // error for a single runtime's Open failure — that runtime is circuit-broken and its
 // lenses back off — so a drain with a healthy Claude lens still proceeds when OpenCode is
-// down. It DOES return an error only if the global runner itself can't even be resolved
+// down. It DOES return an error only if the default runner itself can't even be resolved
 // (a config typo), matching slice-1's fail-closed behavior.
 //
 // Each runner is minted with a cfg carrying the UNION of that runtime's per-lens models
-// (plus the globals for the global runtime), so an OpenCode runner prewarms/validates
-// every model its lenses will actually use — not just the two global stage models.
+// (plus the default models for the default runtime), so an OpenCode runner prewarms/validates
+// every model its lenses will actually use — not just the two default stage models.
 func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses []*lens.Lens) (*runnerSet, error) {
-	rs := &runnerSet{cfg: cfg, byName: map[string]*openedRunner{}, globalR: strings.TrimSpace(cfg.Runner)}
+	rs := &runnerSet{cfg: cfg, byName: map[string]*openedRunner{}, defaultR: strings.TrimSpace(cfg.Runner)}
 
 	// Which runtimes are actually needed, and the model union per runtime.
 	needed := map[string]bool{}
 	for _, ln := range lenses {
 		needed[distill.RunnerFor(cfg, ln)] = true
 	}
-	// The global runner is always potentially needed (the unified summary + any lens with
+	// The default runner is always potentially needed (the unified summary + any lens with
 	// no explicit runner route there). Include it so it's opened even if, say, every
-	// enabled lens declared opencode but the built-in default still rides the global.
-	needed[rs.globalR] = true
+	// enabled lens declared opencode but the built-in default still rides the default.
+	needed[rs.defaultR] = true
 
 	for name := range needed {
 		rs.openRuntime(ctx, st, name, lenses)
 	}
-	// Fail closed if the GLOBAL runner is broken — it's the one runtime the drain can't
+	// Fail closed if the default runner is broken — it's the one runtime the drain can't
 	// proceed without (the always-on default lens + the unified summary ride it), and this
-	// matches slice-1's behavior where a failed global-runner Open returned an error. A
-	// NON-global per-lens runtime being broken is NOT fatal: it's circuit-broken and only
+	// matches slice-1's behavior where a failed default-runner Open returned an error. A
+	// non-default per-lens runtime being broken is NOT fatal: it's circuit-broken and only
 	// its own lenses back off, so a healthy Claude drain isn't wedged by a down OpenCode.
-	if g := rs.byName[rs.globalR]; g == nil || g.runner == nil {
+	if g := rs.byName[rs.defaultR]; g == nil || g.runner == nil {
 		// We're returning nil (so the caller's `defer rs.Close()` never runs) — close every
 		// runtime we DID open here, or a successfully-opened opencode serve would leak when
-		// the global runner is what failed. Map iteration is unordered, so OpenCode may have
-		// opened before the global was even checked.
+		// the default runner is what failed. Map iteration is unordered, so OpenCode may have
+		// opened before the default was even checked.
 		rs.Close()
 		if g != nil && g.err != nil {
 			return nil, g.err
 		}
-		return nil, &runnerDownError{name: rs.globalR}
+		return nil, &runnerDownError{name: rs.defaultR}
 	}
 	return rs, nil
 }
@@ -86,12 +86,12 @@ func newRunnerSet(ctx context.Context, st *store.Store, cfg store.Config, lenses
 func (rs *runnerSet) openRuntime(ctx context.Context, st *store.Store, name string, lenses []*lens.Lens) {
 	rcfg := rs.cfg
 	rcfg.Runner = name
-	applyModelUnion(&rcfg, name, rs.globalR, lenses)
+	applyModelUnion(&rcfg, name, rs.defaultR, lenses)
 
 	runner, err := platform.RunnerForName(name, rcfg)
 	if err != nil {
 		// Resolve failure (unknown runner name). Record broken; newRunnerSet decides whether
-		// it's fatal (global) or per-lens-backoff (a lens's bad `# runner`).
+		// it's fatal (default) or per-lens-backoff (a lens's bad `# runner`).
 		slog.Error("resolve runner", "runner", name, "err", err)
 		rs.byName[name] = &openedRunner{err: err}
 		return
@@ -165,18 +165,18 @@ func (e *runnerDownError) Error() string {
 }
 
 // applyModelUnion sets rcfg's TriageModel/DistillModel to models valid on runtime `name`.
-// For the GLOBAL runtime it keeps the configured globals (they belong to it). For a
-// NON-global runtime the configured globals are for the wrong runtime, so it clears them
+// For the default runtime it keeps the configured default models (they belong to it). For a
+// NON-default runtime the configured default models are for the wrong runtime, so it clears them
 // (the runner uses its own default) — per-lens models are validated separately by the
 // runner's own Open against the union we pass via ValidateModels in doctor; here we only
-// need Open's prewarm to not choke on a wrong-runtime global. The per-lens models
+// need Open's prewarm to not choke on a wrong-runtime default model. The per-lens models
 // themselves are passed per-call (ModelFor), and OpenCode's server accepts any configured
-// model per-call, so prewarming the globals is sufficient for Open to succeed.
-func applyModelUnion(rcfg *store.Config, name, globalRunner string, lenses []*lens.Lens) {
-	if strings.TrimSpace(name) == strings.TrimSpace(globalRunner) {
-		return // keep the configured globals; they belong to this runtime
+// model per-call, so prewarming the default models is sufficient for Open to succeed.
+func applyModelUnion(rcfg *store.Config, name, defaultRunner string, lenses []*lens.Lens) {
+	if strings.TrimSpace(name) == strings.TrimSpace(defaultRunner) {
+		return // keep the configured default models; they belong to this runtime
 	}
-	// Non-global runtime: the configured global models are for the wrong runtime. Clear
+	// Non-default runtime: the configured default models are for the wrong runtime. Clear
 	// them so Open's prewarm/validate doesn't reject a cross-runtime model name; the
 	// runner falls back to its own default and per-lens models are supplied per call.
 	rcfg.TriageModel = ""

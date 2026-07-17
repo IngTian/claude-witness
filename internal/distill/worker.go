@@ -90,13 +90,13 @@ type Worker struct {
 	Run      MineFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
 	// RunFor, when set, picks the MineFunc for a specific lens — the per-lens RUNNER seam
 	// (issue #75 slice 2): a lens declaring its own runtime mines against that runner
-	// instead of the global one. nil → every lens uses Run (the single-runner path, and
+	// instead of the default one. nil → every lens uses Run (the single-runner path, and
 	// what every test that injects only Run relies on). See runFor.
 	RunFor func(ln *lens.Lens) MineFunc
 }
 
 // runFor returns the MineFunc for a lens: the per-lens runner via RunFor when wired,
-// else the single global Run. Centralizes the fallback so mine() (and any future call
+// else the single default Run. Centralizes the fallback so mine() (and any future call
 // site) never has to special-case a nil RunFor.
 func (w *Worker) runFor(ln *lens.Lens) MineFunc {
 	if w.RunFor != nil {

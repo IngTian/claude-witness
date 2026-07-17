@@ -34,7 +34,7 @@ type Reviewer struct {
 }
 
 // runnerFor returns the MineFunc for a lens's review: the per-lens runner via RunnerFor
-// when wired, else the single global Runner.
+// when wired, else the single default Runner.
 func (r *Reviewer) runnerFor(ln *lens.Lens) MineFunc {
 	if r.RunnerFor != nil {
 		if fn := r.RunnerFor(ln); fn != nil {

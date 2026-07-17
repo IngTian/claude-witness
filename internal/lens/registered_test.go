@@ -45,14 +45,14 @@ func TestLoadRegistered(t *testing.T) {
 	if err != nil || l == nil {
 		t.Fatalf("LoadRegistered: l=%v err=%v", l, err)
 	}
-	if l.Name != "math" || l.Global || l.Extract == "" || l.Review == "" || len(l.Dimensions) != 2 {
+	if l.Name != "math" || l.BuiltIn || l.Extract == "" || l.Review == "" || len(l.Dimensions) != 2 {
 		t.Fatalf("loaded lens wrong: %+v", l)
 	}
 	if l.ExtractModel != "openai/gpt-5.5-mini" {
 		t.Fatalf("per-lens extract_model not loaded from lens.json, got %q", l.ExtractModel)
 	}
 	if l.ReviewModel != "" {
-		t.Fatalf("unset review_model should be empty (ride the global), got %q", l.ReviewModel)
+		t.Fatalf("unset review_model should be empty (ride the default), got %q", l.ReviewModel)
 	}
 
 	if _, err := LoadRegistered("missing", dir); err == nil {
