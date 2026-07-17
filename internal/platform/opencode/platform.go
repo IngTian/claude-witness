@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/IngTian/witness/internal/platform"
-	"github.com/IngTian/witness/internal/platform/claude"
 	"github.com/IngTian/witness/internal/store"
 )
 
@@ -78,7 +77,7 @@ func renderChunks(raw []store.RawRecord, maxChars, overlapRecords int) []string 
 		return nil
 	}
 	if maxChars <= 0 {
-		return []string{claude.RenderTranscript(raw)}
+		return []string{platform.RenderTranscript(raw)}
 	}
 	var chunks []string
 	start := 0
@@ -96,7 +95,7 @@ func renderChunks(raw []store.RawRecord, maxChars, overlapRecords int) []string 
 		if end == start {
 			end++
 		}
-		chunks = append(chunks, claude.RenderTranscript(raw[start:end]))
+		chunks = append(chunks, platform.RenderTranscript(raw[start:end]))
 		if end >= len(raw) {
 			break
 		}
