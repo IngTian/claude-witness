@@ -290,13 +290,13 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 // [--review-model M]`, the safe way to tune a registered lens's per-lens runner + models
 // (issue #75). It writes only lens.json fields via a struct round-trip (store.SetLens*)
 // — never text surgery on the prompt files — so it can't corrupt a lens. An empty value
-// clears the field, so the lens rides the global runner/model again.
+// clears the field, so the lens rides the default runner/model again.
 func newLensSetCmd() *cobra.Command {
 	var runner, extractModel, reviewModel string
 	c := &cobra.Command{
 		Use:   "set <name>",
 		Short: "Set a registered lens's per-lens runner + model overrides.",
-		Long:  "Tune a registered lens (written to its lens.json). --runner routes this lens's mine+review to a specific runtime (claude/opencode) instead of the global runner; --extract-model overrides the mining (L0→L1) model; --review-model overrides the review (L1→L2) + summary model. Pass an empty value (e.g. --runner \"\") to clear an override so the lens rides the global again. This is what lets a rare heavy lens run a stronger model — or a cheap lens run a free model on another runtime — without paying for it on every session.",
+		Long:  "Tune a registered lens (written to its lens.json). --runner routes this lens's mine+review to a specific runtime (claude/opencode) instead of the default runner; --extract-model overrides the mining (L0→L1) model; --review-model overrides the review (L1→L2) + summary model. Pass an empty value (e.g. --runner \"\") to clear an override so the lens rides the default again. This is what lets a rare heavy lens run a stronger model — or a cheap lens run a free model on another runtime — without paying for it on every session.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return lensSet(args[0],
@@ -305,7 +305,7 @@ func newLensSetCmd() *cobra.Command {
 				cmd.Flags().Changed("review-model"), reviewModel)
 		},
 	}
-	c.Flags().StringVar(&runner, "runner", "", "per-lens runtime (claude/opencode); empty clears → ride the global runner")
+	c.Flags().StringVar(&runner, "runner", "", "per-lens runtime (claude/opencode); empty clears → ride the default runner")
 	c.Flags().StringVar(&extractModel, "extract-model", "", "per-lens model for mining (L0→L1); empty clears the override")
 	c.Flags().StringVar(&reviewModel, "review-model", "", "per-lens model for review + summary (L1→L2); empty clears the override")
 	return c
@@ -343,13 +343,13 @@ func lensSet(name string, setRunner bool, runner string, setExtract bool, extrac
 		return err
 	}
 	fmt.Printf("lens %q: runner=%s extract-model=%s review-model=%s\n",
-		name, modelOrGlobal(l.Runner), modelOrGlobal(l.ExtractModel), modelOrGlobal(l.ReviewModel))
+		name, modelOrDefaultLabel(l.Runner), modelOrDefaultLabel(l.ExtractModel), modelOrDefaultLabel(l.ReviewModel))
 	return nil
 }
 
-func modelOrGlobal(m string) string {
+func modelOrDefaultLabel(m string) string {
 	if strings.TrimSpace(m) == "" {
-		return dim("(global)")
+		return dim("(default)")
 	}
 	return m
 }

@@ -198,7 +198,7 @@ func isLensStagingDir(name string) bool {
 // SetLensModel updates a registered lens's per-lens model in its lens.json (issue #75),
 // creating the file if absent. phase selects the field: "extract" → extract_model,
 // "review" → review_model. An empty value CLEARS the field (the lens then rides the
-// global stage model). This is the safe struct round-trip that replaced hand-editing
+// default stage model). This is the safe struct round-trip that replaced hand-editing
 // header directives: read → set one field → marshal → atomic write, so no text surgery
 // can corrupt the file. It does NOT touch extract.md/review.md.
 func (s *Store) SetLensModel(name, phase, model string) error {
@@ -216,7 +216,7 @@ func (s *Store) SetLensModel(name, phase, model string) error {
 
 // SetLensRunner sets a registered lens's per-lens runtime in its lens.json (issue #75
 // slice 2): "claude"/"opencode" routes the lens's mine+review to that runner; an empty
-// value CLEARS it so the lens rides the global runner. Same safe struct round-trip as
+// value CLEARS it so the lens rides the default runner. Same safe struct round-trip as
 // SetLensModel — no text surgery. It does NOT validate the runner name here (an unknown
 // name surfaces at drain time via the runner-set's circuit breaker + at `witness doctor`),
 // matching how per-lens models are handled.
@@ -226,7 +226,7 @@ func (s *Store) SetLensRunner(name, runner string) error {
 
 // setLensJSONField is the shared, locked read-modify-write for a single lens.json field:
 // preserve every other field, set the given one (or DELETE it when value is empty so the
-// lens falls back to the global), and atomically write. This is the one place lens.json is
+// lens falls back to the default), and atomically write. This is the one place lens.json is
 // mutated by the CLI — a struct/map round-trip, never text surgery (the #71 bug class).
 func (s *Store) setLensJSONField(name, field, value string) error {
 	// Same registry lock as RegisterLens: a lens.json write must not race a concurrent
@@ -255,7 +255,7 @@ func (s *Store) setLensJSONField(name, field, value string) error {
 		raw = map[string]any{}
 	}
 	if strings.TrimSpace(value) == "" {
-		delete(raw, field) // clear → fall back to the global
+		delete(raw, field) // clear → fall back to the default
 	} else {
 		raw[field] = strings.TrimSpace(value)
 	}

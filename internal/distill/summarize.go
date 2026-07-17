@@ -23,19 +23,19 @@ type SummarizeFunc = MineFunc
 type Summarizer struct {
 	Store         *store.Store
 	Config        store.Config
-	Lenses        []*lens.Lens  // active lenses, so a per-lens summary uses that lens's ReviewModel (#75); a facet whose lens isn't here (orphan) falls back to the global DistillModel
+	Lenses        []*lens.Lens  // active lenses, so a per-lens summary uses that lens's ReviewModel (#75); a facet whose lens isn't here (orphan) falls back to the default DistillModel
 	LensPrompt    string        // prompts/summarize/lens.md
 	UnifiedPrompt string        // prompts/summarize/unified.md
 	Run           SummarizeFunc // required; production wires RunnerMine(NewRunner(cfg)), tests inject a fake
 	// RunFor, when set, picks the SummarizeFunc for a specific lens — the per-lens RUNNER
 	// seam (issue #75 slice 2). A per-lens summary then runs on that lens's own runtime,
 	// like its review. nil → every summary uses Run. The unified cross-lens portrait has no
-	// single lens, so it always uses Run (the global runner).
+	// single lens, so it always uses Run (the default runner).
 	RunFor func(ln *lens.Lens) SummarizeFunc
 }
 
 // runFor returns the SummarizeFunc for a lens: the per-lens runner via RunFor when wired,
-// else the global Run.
+// else the default Run.
 func (sm *Summarizer) runFor(ln *lens.Lens) SummarizeFunc {
 	if sm.RunFor != nil {
 		if fn := sm.RunFor(ln); fn != nil {
@@ -72,7 +72,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 
 	// Index the active lenses by name so each per-lens summary uses that lens's own
 	// runner + review model (#75). A facet whose lens isn't in the active set (an orphan
-	// from a since-deregistered lens) maps to nil → global runner + global model.
+	// from a since-deregistered lens) maps to nil → default runner + default model.
 	byName := map[string]*lens.Lens{}
 	for _, l := range sm.Lenses {
 		byName[l.Name] = l
@@ -92,7 +92,7 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, md)
 	}
 
-	// The unified portrait spans all lenses → no single lens → the global DistillModel
+	// The unified portrait spans all lenses → no single lens → the default DistillModel
 	// (ModelFor with a nil lens).
 	umd, err := sm.Run(ctx, ModelFor(sm.Config, nil, PhaseReview), sm.UnifiedPrompt, portrait.String())
 	if err != nil {

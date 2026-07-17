@@ -223,7 +223,7 @@ func (s *Store) ReadMeta(session string) SessionMeta {
 }
 
 // SetSessionPlatform records which platform OWNS a session (the per-session axis,
-// issue #21) — distinct from the global distillation runner. Upsert, since a CC
+// issue #21) — distinct from the default distillation runner. Upsert, since a CC
 // session has no session_meta row until now: INSERT the row if absent, else set
 // only the platform column (leaving cwd/started untouched). Best-effort at the
 // capture/import boundary; ForSession falls back to the id prefix when unset, so a

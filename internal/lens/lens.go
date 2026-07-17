@@ -33,11 +33,11 @@ import (
 
 // Lens carries the two prompts the distiller needs plus identity and per-lens
 // runner/model overrides. Runner/ExtractModel/ReviewModel are empty by default:
-//   - Runner "" → the lens rides the GLOBAL runner (the single runner a slice-1 install
+//   - Runner "" → the lens rides the default runner (the single runner a slice-1 install
 //     uses). A non-empty Runner ("claude"/"opencode") routes this lens's mine+review
 //     calls to that runtime instead — so a cheap free-model lens can run on OpenCode
-//     while the always-on default stays on the global runner (issue #75 slice 2).
-//   - ExtractModel/ReviewModel "" → ride the global stage model for the RESOLVED runner,
+//     while the always-on default stays on the default runner (issue #75 slice 2).
+//   - ExtractModel/ReviewModel "" → ride the default stage model for the RESOLVED runner,
 //     resolved by distill.ModelFor. A model name is only valid on its runtime, so these
 //     are meaningful only together with (or under a matching) Runner.
 type Lens struct {
@@ -46,7 +46,7 @@ type Lens struct {
 	Dimensions   []string
 	Extract      string // prompt for per-session mining -> observations
 	Review       string // prompt for the reviewer -> facets
-	Runner       string // per-lens runtime ("claude"/"opencode"); "" = global runner
+	Runner       string // per-lens runtime ("claude"/"opencode"); "" = default runner
 	ExtractModel string // per-lens override for the mine (L0→L1) model; "" = runner default
 	ReviewModel  string // per-lens override for the review (L1→L2) model; "" = runner default
 }
@@ -83,7 +83,7 @@ func promptsDir() string {
 // LoadDefault loads the always-on global lens from prompts/default/. Its identity and
 // dimensions are hardcoded (not a lens.json) because it is the built-in backbone; only
 // its two prompts live on disk, in the same extract.md/review.md shape a registered
-// lens uses. The default rides the global stage models (no per-lens override), which
+// lens uses. The default rides the default stage models (no per-lens override), which
 // is correct: it runs on EVERY session, so it should be the cheap/consistent default.
 func LoadDefault() (*Lens, error) {
 	dir := filepath.Join(promptsDir(), "default")

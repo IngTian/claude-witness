@@ -173,7 +173,7 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	cfg := st.LoadConfig()
 	cfg.Runner = st.ResolveRunner(cfg)
 	// If the candidate lens declares its own runner (#75 slice 2), preview on THAT runtime
-	// (a single candidate = one runner) and clear the wrong-runtime global models. See
+	// (a single candidate = one runner) and clear the wrong-runtime default models. See
 	// tryRunnerCfg.
 	cfg = tryRunnerCfg(cfg, ln)
 	// Model overrides must be applied BEFORE the runner is minted/opened: OpenCode's Open
@@ -183,7 +183,7 @@ func cmdLensTry(file string, opts lensTryOpts) error {
 	//
 	// Apply the override onto BOTH cfg (so OpenCode prewarms the right model) AND the
 	// lens's own per-lens model fields (#75): distill.ModelFor prefers a lens's
-	// ExtractModel/ReviewModel over the global, so overriding only cfg would let a
+	// ExtractModel/ReviewModel over the default, so overriding only cfg would let a
 	// registered lens's own per-lens model shadow the explicit --model the user asked to
 	// preview ON. Explicit --model is the user's stated preview intent and must win.
 	if opts.model != "" {
@@ -397,18 +397,18 @@ func runPreviews(conc int, sessions []string, preview func(sess string) tryResul
 }
 
 // tryRunnerCfg points a preview's cfg at the candidate lens's own runner (#75 slice 2) so
-// `lens try` previews a lens AS CONFIGURED, and clears the configured global stage models
-// when that runner differs from the resolved global. Those globals belong to the global
+// `lens try` previews a lens AS CONFIGURED, and clears the configured default stage models
+// when that runner differs from the resolved default. Those models belong to the default
 // runtime; on a different runtime they are a bad model name that would abort OpenCode's
 // Open (ValidateModels) or misroute the mine — so a cross-runtime preview rides the new
 // runtime's own default, mirroring production's applyModelUnion. cfg.Runner must already be
-// the RESOLVED global runner. Pure (returns a modified copy) so it is unit-testable.
+// the RESOLVED default runner. Pure (returns a modified copy) so it is unit-testable.
 func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
-	globalRunner := cfg.Runner
+	defaultRunner := cfg.Runner
 	if r := distill.RunnerFor(cfg, ln); r != "" {
 		cfg.Runner = r
 	}
-	if strings.TrimSpace(cfg.Runner) != strings.TrimSpace(globalRunner) {
+	if strings.TrimSpace(cfg.Runner) != strings.TrimSpace(defaultRunner) {
 		cfg.TriageModel = ""
 		cfg.DistillModel = ""
 	}
@@ -418,7 +418,7 @@ func tryRunnerCfg(cfg store.Config, ln *lens.Lens) store.Config {
 // modelLabel renders a model name for display ("runner default" when unset, so the
 // reader knows which model produced the preview). It takes the ALREADY-RESOLVED model
 // (from distill.ModelFor), not the raw config, because a lens may mine/review on its own
-// per-lens model (#75) — labelling from cfg alone would report the global while the
+// per-lens model (#75) — labelling from cfg alone would report the default while the
 // preview actually ran on the per-lens model, hiding the exact variable a prompt-diff
 // run is testing.
 func modelLabel(model string) string {

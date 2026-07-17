@@ -7,20 +7,20 @@ import (
 	"github.com/IngTian/witness/internal/store"
 )
 
-// ModelFor is the per-lens/global model resolver (#75): a lens's per-lens override wins
-// for its phase, else the global stage model; a nil lens (the cross-lens unified summary)
-// always takes the global. This is the whole behavior slice 1 adds.
+// ModelFor is the per-lens/default model resolver (#75): a lens's per-lens override wins
+// for its phase, else the default stage model; a nil lens (the cross-lens unified summary)
+// always takes the default. This is the whole behavior slice 1 adds.
 func TestModelFor(t *testing.T) {
-	cfg := store.Config{TriageModel: "global-triage", DistillModel: "global-distill"}
+	cfg := store.Config{TriageModel: "default-triage", DistillModel: "default-distill"}
 
-	// A lens that declares nothing rides the global stage model for each phase — the
+	// A lens that declares nothing rides the default stage model for each phase — the
 	// pre-#75 behavior, unchanged.
 	plain := &lens.Lens{Name: "plain"}
-	if got := ModelFor(cfg, plain, PhaseExtract); got != "global-triage" {
-		t.Fatalf("plain lens extract: want global-triage, got %q", got)
+	if got := ModelFor(cfg, plain, PhaseExtract); got != "default-triage" {
+		t.Fatalf("plain lens extract: want default-triage, got %q", got)
 	}
-	if got := ModelFor(cfg, plain, PhaseReview); got != "global-distill" {
-		t.Fatalf("plain lens review: want global-distill, got %q", got)
+	if got := ModelFor(cfg, plain, PhaseReview); got != "default-distill" {
+		t.Fatalf("plain lens review: want default-distill, got %q", got)
 	}
 
 	// Per-lens overrides win for their own phase, independently.
@@ -32,36 +32,36 @@ func TestModelFor(t *testing.T) {
 		t.Fatalf("tuned lens review override ignored, got %q", got)
 	}
 
-	// A per-lens override for ONLY one phase leaves the other on the global.
+	// A per-lens override for ONLY one phase leaves the other on the default.
 	extractOnly := &lens.Lens{Name: "eo", ExtractModel: "cheap-extract"}
 	if got := ModelFor(cfg, extractOnly, PhaseExtract); got != "cheap-extract" {
 		t.Fatalf("extract-only override ignored, got %q", got)
 	}
-	if got := ModelFor(cfg, extractOnly, PhaseReview); got != "global-distill" {
+	if got := ModelFor(cfg, extractOnly, PhaseReview); got != "default-distill" {
 		t.Fatalf("extract-only override must not affect review, got %q", got)
 	}
 
-	// A whitespace-only override is treated as unset (rides the global).
+	// A whitespace-only override is treated as unset (rides the default).
 	blank := &lens.Lens{Name: "b", ExtractModel: "   "}
-	if got := ModelFor(cfg, blank, PhaseExtract); got != "global-triage" {
-		t.Fatalf("whitespace override must ride the global, got %q", got)
+	if got := ModelFor(cfg, blank, PhaseExtract); got != "default-triage" {
+		t.Fatalf("whitespace override must ride the default, got %q", got)
 	}
 
-	// A nil lens (the unified cross-lens summary) always takes the global stage model.
-	if got := ModelFor(cfg, nil, PhaseExtract); got != "global-triage" {
-		t.Fatalf("nil lens extract: want global-triage, got %q", got)
+	// A nil lens (the unified cross-lens summary) always takes the default stage model.
+	if got := ModelFor(cfg, nil, PhaseExtract); got != "default-triage" {
+		t.Fatalf("nil lens extract: want default-triage, got %q", got)
 	}
-	if got := ModelFor(cfg, nil, PhaseReview); got != "global-distill" {
-		t.Fatalf("nil lens review: want global-distill, got %q", got)
+	if got := ModelFor(cfg, nil, PhaseReview); got != "default-distill" {
+		t.Fatalf("nil lens review: want default-distill, got %q", got)
 	}
 }
 
-// RunnerFor routes a lens to its own runner if set, else the global (cfg.Runner); a nil
-// lens rides the global (#75 slice 2).
+// RunnerFor routes a lens to its own runner if set, else the default (cfg.Runner); a nil
+// lens rides the default (#75 slice 2).
 func TestRunnerFor(t *testing.T) {
 	cfg := store.Config{Runner: "claude"}
 	if got := RunnerFor(cfg, &lens.Lens{Name: "x"}); got != "claude" {
-		t.Fatalf("lens with no runner rides the global, got %q", got)
+		t.Fatalf("lens with no runner rides the default, got %q", got)
 	}
 	if got := RunnerFor(cfg, &lens.Lens{Name: "x", Runner: "opencode"}); got != "opencode" {
 		t.Fatalf("per-lens runner must win, got %q", got)
@@ -70,19 +70,19 @@ func TestRunnerFor(t *testing.T) {
 		t.Fatalf("per-lens runner must be trimmed, got %q", got)
 	}
 	if got := RunnerFor(cfg, nil); got != "claude" {
-		t.Fatalf("nil lens rides the global, got %q", got)
+		t.Fatalf("nil lens rides the default, got %q", got)
 	}
 }
 
-// ModelFor is runner-aware (#75 slice 2): a lens on a DIFFERENT runner than the global,
+// ModelFor is runner-aware (#75 slice 2): a lens on a DIFFERENT runner than the default,
 // with no per-lens model, must fall back to "" (its runtime's own default) — NOT the
-// global stage model, which belongs to the wrong runtime. A per-lens model still wins
+// default stage model, which belongs to the wrong runtime. A per-lens model still wins
 // regardless of runner.
 func TestModelForCrossRuntime(t *testing.T) {
 	cfg := store.Config{Runner: "claude", TriageModel: "claude-triage", DistillModel: "claude-distill"}
 
 	// A lens routed to a DIFFERENT runner with no per-lens model → "" (opencode's default),
-	// not the claude global (which would be a wrong-runtime model name).
+	// not the claude default (which would be a wrong-runtime model name).
 	cross := &lens.Lens{Name: "cr", Runner: "opencode"}
 	if got := ModelFor(cfg, cross, PhaseExtract); got != "" {
 		t.Fatalf("cross-runtime lens with no model must ride its runtime default (\"\"), got %q", got)
@@ -100,9 +100,9 @@ func TestModelForCrossRuntime(t *testing.T) {
 		t.Fatalf("cross-runtime per-lens review model ignored, got %q", got)
 	}
 
-	// A lens on the SAME runner as the global (explicitly) still inherits the globals.
+	// A lens on the SAME runner as the default (explicitly) still inherits the defaults.
 	same := &lens.Lens{Name: "s", Runner: "claude"}
 	if got := ModelFor(cfg, same, PhaseExtract); got != "claude-triage" {
-		t.Fatalf("a lens on the global runner must inherit the global model, got %q", got)
+		t.Fatalf("a lens on the default runner must inherit the default model, got %q", got)
 	}
 }

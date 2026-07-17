@@ -52,7 +52,7 @@ func TestLoadRegistered(t *testing.T) {
 		t.Fatalf("per-lens extract_model not loaded from lens.json, got %q", l.ExtractModel)
 	}
 	if l.ReviewModel != "" {
-		t.Fatalf("unset review_model should be empty (ride the global), got %q", l.ReviewModel)
+		t.Fatalf("unset review_model should be empty (ride the default), got %q", l.ReviewModel)
 	}
 
 	if _, err := LoadRegistered("missing", dir); err == nil {

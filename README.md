@@ -100,10 +100,10 @@ witness lens enable  math               # start running it on every session
 `register` stores a **copy** — editing the original afterward has no effect until you re-register.
 `enable` is the separate switch that makes it actually run.
 
-**Per-lens models (optional).** By default every lens rides the global models (`witness config set
+**Per-lens models (optional).** By default every lens rides the default models (`witness config set
 triage_model / distill_model`). A rare heavy lens can pin a stronger model just for itself —
 without paying for it on every session — with `witness lens set math --extract-model <m>`
-(and `--review-model <m>`); pass an empty value to clear it and ride the global again.
+(and `--review-model <m>`); pass an empty value to clear it and ride the default again.
 
 The source directory may live anywhere. As a recommended canonical location, witness keeps the
 registered copy beside `config.toml` under `<witness-data-dir>/lenses/<name>/` (normally
