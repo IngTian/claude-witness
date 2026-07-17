@@ -226,17 +226,18 @@ func cmdDistillStatus(asJSON bool) error {
 	// The flock is the SOLE liveness authority (issue #75): the OS drops it when the
 	// holder dies — normal exit, SIGKILL, OOM, or power loss alike — so a crashed
 	// worker reads as idle here with no `ps` probe and no stale-state self-heal. The
-	// worker_* meta is diagnostic only: trust its detail (pid/mode/heartbeat/current)
-	// ONLY while a worker is genuinely live (the running worker maintains those fields
-	// as it drains). When idle the values may be stale from a past crash — the next
+	// running/stopping sub-state is DERIVED, not stored: a live worker with a pending
+	// worker_stop_requested is "stopping", otherwise "running". The remaining worker_*
+	// meta is diagnostic only (pid/mode/heartbeat/current), trusted ONLY while a worker
+	// is genuinely live; when idle the values may be stale from a past crash — the next
 	// worker start overwrites them — so we surface nothing but "idle".
 	active := st.WorkerActive()
 	status := "idle"
 	var pid, mode, heartbeat, current string
 	if active {
-		status = st.MetaString("worker_status")
-		if status != "running" && status != "stopping" {
-			status = "running" // live per the flock, even if the meta hasn't caught up
+		status = "running"
+		if st.MetaString("worker_stop_requested") == "1" {
+			status = "stopping"
 		}
 		pid = st.MetaString("worker_pid")
 		mode = st.MetaString("worker_mode")
@@ -371,12 +372,14 @@ func cmdDistillStop(autoOnly bool) error {
 	// missing or stale (a worker that just claimed the lock but hasn't stamped its pid
 	// yet), the worker still honors the flag at its next checkpoint. We therefore
 	// report the stop request rather than error when the signal can't be delivered.
+	// worker_stop_requested=1 (set above) IS the "stopping" state now — cmdDistillStatus
+	// derives it from that flag while the worker is live, so there's no separate status
+	// key to update here.
 	pid := st.MetaString("worker_pid")
 	if err := terminateWorker(pid); err != nil {
 		fmt.Println("distill stop requested; the running worker will exit at its next checkpoint")
 		return nil
 	}
-	_ = st.SetMetaString("worker_status", "stopping")
 	fmt.Printf("distill stop requested; sent TERM to worker pid=%s\n", pid)
 	return nil
 }

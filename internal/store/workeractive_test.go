@@ -30,16 +30,15 @@ func TestWorkerActiveTracksLock(t *testing.T) {
 
 // WorkerActive must ignore stale worker_* meta entirely — the whole reason to make
 // the flock the sole authority (issue #75 / #73-C2) is that a worker killed by
-// SIGKILL/OOM/power-loss leaves worker_status="running" + a dead pid behind, and the
-// OS-released flock is the only trustworthy "is it alive" signal. The old
-// meta+`ps`-probe self-heal existed only to paper over exactly this; here we prove
-// the replacement needs no probe: crash residue reads as not-active.
+// SIGKILL/OOM/power-loss leaves a dead pid (and, before the meta collapse, a
+// "running" status) behind, and the OS-released flock is the only trustworthy "is it
+// alive" signal. The old meta+`ps`-probe self-heal existed only to paper over exactly
+// this; here we prove the replacement needs no probe: crash residue reads as not-active.
 func TestWorkerActiveIgnoresStaleRunningMeta(t *testing.T) {
 	s := tempStore(t)
-	_ = s.SetMetaString("worker_status", "running")
-	_ = s.SetMetaString("worker_pid", "999999") // a pid no live worker owns
+	_ = s.SetMetaString("worker_pid", "999999") // a pid no live worker owns (crash residue)
 	if s.WorkerActive() {
-		t.Fatal("stale running meta with no held lock must NOT read as active (flock is the authority)")
+		t.Fatal("stale worker meta with no held lock must NOT read as active (flock is the authority)")
 	}
 }
 
