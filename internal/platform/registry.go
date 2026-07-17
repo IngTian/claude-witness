@@ -69,6 +69,23 @@ type InputRenderer interface {
 	RenderInputs(raw []store.RawRecord) []string
 }
 
+// RenderTranscript renders raw records as "ROLE: text\n\n". It is the shared,
+// source-neutral transcript format every runtime's RenderInputs emits — the whole
+// session for a hook-fed source (Claude), one string per overlapping chunk for a
+// structured-log source (OpenCode). It lives in the leaf platform package (like
+// WrapCorpus) so both paths format identically from one source and a new runtime
+// gets it for free — rather than one runtime importing another as a de-facto base.
+func RenderTranscript(raw []store.RawRecord) string {
+	var b strings.Builder
+	for _, r := range raw {
+		b.WriteString(strings.ToUpper(r.Role))
+		b.WriteString(": ")
+		b.WriteString(r.Text)
+		b.WriteString("\n\n")
+	}
+	return b.String()
+}
+
 // registry holds the registered platforms, keyed by Name(). It is populated by
 // each platform subpackage's init(), so importing a subpackage (even blank) makes
 // its platform available. Registration happens at process start before any

@@ -3,7 +3,6 @@ package claude
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/IngTian/witness/internal/platform"
@@ -27,7 +26,7 @@ func (Platform) SessionPrefix() string { return "" }
 // gives witness flattened hook text (no structured parts), so there is nothing to
 // chunk — one input per session.
 func (Platform) RenderInputs(raw []store.RawRecord) []string {
-	return []string{RenderTranscript(raw)}
+	return []string{platform.RenderTranscript(raw)}
 }
 
 // Capture unmarshals the Claude Code hook payload and writes one L0 record. The
@@ -53,19 +52,4 @@ func (Platform) Capture(st *store.Store, data []byte, now time.Time) (bool, erro
 // no external native store to reconcile from.
 func (Platform) Import(context.Context, *store.Store, []string) (platform.ImportStats, error) {
 	return platform.ImportStats{Agent: "claude"}, nil
-}
-
-// RenderTranscript renders raw records as "ROLE: text\n\n". Exported because it is
-// the shared, source-neutral transcript format the OpenCode chunker also emits per
-// chunk (both feed the same mining prompt), so it lives on the default platform
-// rather than being duplicated.
-func RenderTranscript(raw []store.RawRecord) string {
-	var b strings.Builder
-	for _, r := range raw {
-		b.WriteString(strings.ToUpper(r.Role))
-		b.WriteString(": ")
-		b.WriteString(r.Text)
-		b.WriteString("\n\n")
-	}
-	return b.String()
 }
