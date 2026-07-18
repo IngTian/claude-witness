@@ -44,7 +44,8 @@ type Store struct {
 	Root string
 	db   *sql.DB
 
-	metaKV // small-scalar `meta` + `session_meta` bookkeeping (issue #73-C1)
+	metaKV    // small-scalar `meta` + `session_meta` bookkeeping (issue #73-C1)
+	profileFS // L4 narrative profile files under <root>/profile/ (issue #73-C1)
 }
 
 // Open returns the Store rooted at WITNESS_HOME, else the resolved default under
@@ -58,7 +59,9 @@ func Open() (*Store, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil { // 0700: private growth data
 		return nil, fmt.Errorf("mkdir %s: %w", root, err)
 	}
-	s := &Store{Root: root}
+	// The filesystem concerns get their own copy of root (immutable post-Open, so it
+	// can't drift from Store.Root). The DB-backed concerns are wired after openDB.
+	s := &Store{Root: root, profileFS: profileFS{root: root}}
 	// Lay down a fully-commented config template on first contact so any command a
 	// user runs (doctor, profile, lens...) exposes every tunable — not just the
 	// fields install writes. Existing configs are never touched (forward-compatible).
