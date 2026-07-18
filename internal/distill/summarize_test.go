@@ -3,6 +3,8 @@ package distill
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,6 +61,119 @@ func TestSummarizerWritesPerLensAndUnified(t *testing.T) {
 	// The unified pass sees the per-lens summaries (which echo the facet values).
 	if !strings.Contains(unifiedInput, "recovers with arithmetic") || !strings.Contains(unifiedInput, "stops at good enough") {
 		t.Fatalf("unified input should contain the per-lens summaries, got: %q", unifiedInput)
+	}
+}
+
+// Dirty-tracking (#73-S5): re-running Summarize with UNCHANGED facets must make ZERO
+// LLM calls — every per-lens summary is signature-matched and reused, and the unified
+// portrait is skipped because no lens changed. The prior files stay intact.
+func TestSummarizerSkipsUnchanged(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	calls := 0
+	fake := func(_ context.Context, _, _, _ string) (string, error) {
+		calls++
+		return "OUT", nil
+	}
+	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: fake}
+
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("first Summarize: %v", err)
+	}
+	first := calls // 2 lenses + 1 unified = 3
+	if first != 3 {
+		t.Fatalf("first pass: want 3 calls (2 lenses + unified), got %d", first)
+	}
+
+	// Second pass, nothing changed → no calls at all.
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("second Summarize: %v", err)
+	}
+	if calls != first {
+		t.Fatalf("unchanged re-run must make 0 new calls, made %d", calls-first)
+	}
+}
+
+// A change to ONE lens's facets regenerates exactly that lens + the unified portrait
+// (which depends on it) — not the other, unchanged lens (#73-S5).
+func TestSummarizerRegeneratesOnlyChangedLens(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	var lensInputs []string
+	unifiedCalls := 0
+	fake := func(_ context.Context, _, prompt, input string) (string, error) {
+		if prompt == "UNIFIED" {
+			unifiedCalls++
+			return "PORTRAIT", nil
+		}
+		lensInputs = append(lensInputs, input)
+		return "SUMMARY<" + input + ">", nil
+	}
+	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: fake}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("first Summarize: %v", err)
+	}
+	lensInputs = nil
+	unifiedCalls = 0
+
+	// Change ONLY the math lens's facet value (WriteFacets is replace-all).
+	if err := s.WriteFacets([]store.Facet{
+		{Lens: "default", Dimension: "traits", Key: "satisfices",
+			Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9}}},
+		{Lens: "math", Dimension: "resilience", Key: "trip_wire",
+			Versions: []store.FacetVersion{{Value: "recovers with CALCULUS now", Confidence: 0.87}}},
+	}); err != nil {
+		t.Fatalf("mutate facets: %v", err)
+	}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("second Summarize: %v", err)
+	}
+
+	// Exactly one per-lens call, and it must be for math (its new value present).
+	if len(lensInputs) != 1 {
+		t.Fatalf("want exactly 1 per-lens regen (math), got %d: %v", len(lensInputs), lensInputs)
+	}
+	if !strings.Contains(lensInputs[0], "CALCULUS") {
+		t.Fatalf("the regenerated lens should be math (new value), got input: %q", lensInputs[0])
+	}
+	// The unchanged default lens's summary must still be present (reused, not lost).
+	if md, ok, _ := s.ReadProfile("default"); !ok || !strings.Contains(md, "stops at good enough") {
+		t.Fatalf("unchanged default summary should be reused intact, got ok=%v md=%q", ok, md)
+	}
+	// A lens changed → unified regenerates once.
+	if unifiedCalls != 1 {
+		t.Fatalf("a changed lens must regenerate the unified portrait once, got %d", unifiedCalls)
+	}
+}
+
+// Self-heal (#73-S5): if a per-lens profile file is deleted but its signature still
+// matches, Summarize must REGENERATE it (skip only when the prior file exists), not
+// leave the profile permanently missing.
+func TestSummarizerRegeneratesWhenProfileFileMissing(t *testing.T) {
+	s := newStore(t)
+	seedFacets(t, s)
+	calls := 0
+	fake := func(_ context.Context, _, _, _ string) (string, error) { calls++; return "OUT", nil }
+	sm := &Summarizer{Store: s, Config: store.Config{}, LensPrompt: "LENS", UnifiedPrompt: "UNIFIED", Run: fake}
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("first Summarize: %v", err)
+	}
+	// Delete the default lens's profile file, leaving its signature stamped. (No store
+	// delete method exists; remove the plain <lens>.md file under ProfileDir directly.)
+	if err := os.Remove(filepath.Join(s.ProfileDir(), "default.md")); err != nil {
+		t.Fatalf("delete profile file: %v", err)
+	}
+	calls = 0
+	if err := sm.Summarize(context.Background()); err != nil {
+		t.Fatalf("second Summarize: %v", err)
+	}
+	// Must regenerate the deleted default (its file is gone) even though its sig matches;
+	// the unchanged math lens stays skipped. Unified regenerates because a lens changed.
+	if md, ok, _ := s.ReadProfile("default"); !ok || md != "OUT" {
+		t.Fatalf("deleted profile should self-heal, got ok=%v md=%q", ok, md)
+	}
+	if calls == 0 {
+		t.Fatalf("a missing profile file must force a regen despite a matching signature")
 	}
 }
 
