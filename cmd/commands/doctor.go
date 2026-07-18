@@ -123,16 +123,17 @@ func cmdDoctor(asJSON bool) error {
 			},
 			ModelCheck: modelStatus,
 			Archive: doctorArchiveJSON{
-				Sessions:      stat.Sessions,
-				RawRecords:    stat.RawRecords,
-				Observations:  stat.Observations,
-				Facets:        stat.Facets,
-				Pending:       stat.Pending,
-				BackedOff:     stat.BackedOff,
-				DriftEvents:   driftTotal,
-				DriftLast:     driftLastTS,
-				DriftLastLens: driftLastLens,
-				LastReview:    lastReview,
+				Sessions:        stat.Sessions,
+				RawRecords:      stat.RawRecords,
+				Observations:    stat.Observations,
+				Facets:          stat.Facets,
+				Pending:         stat.Pending,
+				BackedOff:       stat.BackedOff,
+				DriftedSessions: stat.Drifted,
+				DriftEvents:     driftTotal,
+				DriftLast:       driftLastTS,
+				DriftLastLens:   driftLastLens,
+				LastReview:      lastReview,
 			},
 			Embedder: doctorEmbedderJSON{
 				Status:      embedderStatus,
@@ -200,7 +201,14 @@ func cmdDoctor(asJSON bool) error {
 	fmt.Println("  " + bold("Archive"))
 	fmt.Printf("    %s %d sessions · %d raw messages · %d observations · %d facets\n",
 		label("layers"), stat.Sessions, stat.RawRecords, stat.Observations, stat.Facets)
+	// "N drifted" is the CURRENTLY-outstanding count (#69-2): distinct sessions whose
+	// last mine of some lens drifted and hasn't cleanly re-mined since. It drops as
+	// sessions recover, unlike the lifetime "drift events" total surfaced in the
+	// Distillation block above. Shown only when > 0 to keep a healthy archive's line clean.
 	queueLine := fmt.Sprintf("%d pending · %d backing off · last review: %s", stat.Pending, stat.BackedOff, lastReview)
+	if stat.Drifted > 0 {
+		queueLine = fmt.Sprintf("%d pending · %d backing off · %d drifted · last review: %s", stat.Pending, stat.BackedOff, stat.Drifted, lastReview)
+	}
 	if stat.BackedOff > 0 {
 		fmt.Printf("    %s %s\n", label("queue"), yellow(queueLine))
 		fmt.Printf("    %s %s\n", warnGlyph(), yellow("sessions are backing off — mining is failing; check witness.log"))
@@ -273,16 +281,17 @@ type doctorConfigJSON struct {
 }
 
 type doctorArchiveJSON struct {
-	Sessions      int    `json:"sessions"`
-	RawRecords    int    `json:"raw_records"`
-	Observations  int    `json:"observations"`
-	Facets        int    `json:"facets"`
-	Pending       int    `json:"pending"`
-	BackedOff     int    `json:"backed_off"`
-	DriftEvents   int    `json:"drift_events"` // not omitempty: 0 is a meaningful "no drift"
-	DriftLast     string `json:"drift_last,omitempty"`
-	DriftLastLens string `json:"drift_last_lens,omitempty"`
-	LastReview    string `json:"last_review"`
+	Sessions        int    `json:"sessions"`
+	RawRecords      int    `json:"raw_records"`
+	Observations    int    `json:"observations"`
+	Facets          int    `json:"facets"`
+	Pending         int    `json:"pending"`
+	BackedOff       int    `json:"backed_off"`
+	DriftedSessions int    `json:"drifted_sessions"` // #69-2: sessions CURRENTLY at a drift; not omitempty (0 = none now)
+	DriftEvents     int    `json:"drift_events"`     // not omitempty: 0 is a meaningful "no drift"
+	DriftLast       string `json:"drift_last,omitempty"`
+	DriftLastLens   string `json:"drift_last_lens,omitempty"`
+	LastReview      string `json:"last_review"`
 }
 
 type doctorEmbedderJSON struct {

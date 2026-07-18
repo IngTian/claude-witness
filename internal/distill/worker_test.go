@@ -505,6 +505,53 @@ func TestProseDriftAdvancesAndIsCounted(t *testing.T) {
 	}
 }
 
+// #69 Part 2: a drift is PERSISTED to progress.drift_at through the real commit path
+// (Process → CommitMining), and a subsequent clean re-mine of the same (session,lens)
+// CLEARS it (via ResetRetry). This is the whole point of Part 2 — the drift signal now
+// survives a worker restart and reflects the LATEST outcome, not just an in-memory flag.
+func TestDriftPersistsAndClearsOnReMine(t *testing.T) {
+	s := newStore(t)
+	drifts := true
+	w := testWorker(s, &fakeMiner{})
+	w.Run = func(_ context.Context, _, _, _ string) (string, error) {
+		if drifts {
+			return "Nothing structured to report.", nil // prose, no JSON array → drift
+		}
+		return `[{"dimension":"thinking","observation":"o","evidence":"e","poignancy":3}]`, nil
+	}
+	capture(t, s, "s", "user", "alpha")
+	capture(t, s, "s", "assistant", "reply")
+
+	// Pass 1 drifts: the stamp is persisted, and Stats/doctor see the session as drifted.
+	if err := w.Process(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DriftAt("s", "default"); got == "" {
+		t.Fatal("drift must be persisted to progress.drift_at through the commit path")
+	}
+	if st := s.Stats([]string{"default"}); st.Drifted != 1 {
+		t.Fatalf("a persisted drift must surface in Stats.Drifted, got %d", st.Drifted)
+	}
+
+	// Add a new turn so pass 2 has a delta to re-mine (the watermark already advanced
+	// to 2 on the drift), then let the model return a real array — a clean re-mine.
+	capture(t, s, "s", "user", "beta")
+	capture(t, s, "s", "assistant", "reply2")
+	drifts = false
+	if err := w.Process(context.Background(), "s"); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.DriftAt("s", "default"); got != "" {
+		t.Fatalf("a clean re-mine must clear the stale drift stamp, got %q", got)
+	}
+	if st := s.Stats([]string{"default"}); st.Drifted != 0 {
+		t.Fatalf("a recovered session must drop out of Stats.Drifted, got %d", st.Drifted)
+	}
+	if obs, _ := s.ReadObservations("default"); len(obs) != 1 {
+		t.Fatalf("the recovery mine's observation must be written, got %d", len(obs))
+	}
+}
+
 // A genuinely quiet session: the model returned an explicit empty array "[]" (it did
 // the task and found nothing). This is LEGIT quiet — advances the watermark, and must
 // NOT be counted as drift (that distinction is the whole point of #57).
