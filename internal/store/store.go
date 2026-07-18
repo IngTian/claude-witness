@@ -50,6 +50,8 @@ type Store struct {
 	lensReg   // on-disk lens registry under <root>/lenses/ (issue #73-C1)
 	facetIO   // L2 bi-temporal facets (reviewer is sole writer) (issue #73-C1)
 	rawIO     // L0 append-only transcript + size/sample/prune helpers (issue #73-C1)
+	obsIO     // L1 observations + in-session staged buffer (issue #73-C1)
+	queue     // distillation queue: per-(session,lens) watermark/backoff (issue #73-C1)
 }
 
 // Open returns the Store rooted at WITNESS_HOME, else the resolved default under
@@ -89,6 +91,8 @@ func Open() (*Store, error) {
 	s.metaKV = metaKV{db: db}
 	s.facetIO = facetIO{db: db}
 	s.rawIO = rawIO{db: db}
+	s.obsIO = obsIO{db: db}
+	s.queue = queue{db: db}
 	// One-shot (issue #71): fold a config that already carries a deliberate runner
 	// choice (a legacy markerless install, or a manually-uncommented runner line)
 	// into the runner_bound flag — the SINGLE source of truth ResolveRunner reads.

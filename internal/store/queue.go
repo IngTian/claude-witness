@@ -1,127 +1,30 @@
 package store
 
 import (
-	"encoding/json"
+	"database/sql"
 	"strings"
 	"time"
 )
 
-// The L0 raw transcript IO (AppendRaw, ApplyRawImport, ReadRaw, ReadRawSnapshot,
-// RawCount, LastRawTS, Sample*, RawChars, LastDistilledRawTS, NextSeq, MaxRawID,
-// RawPruneStats, PruneSessionsBefore) lives on the rawIO concern — see raw.go (issue
-// #73-C1). session-meta bookkeeping (RecordMeta/ReadMeta/SetSessionPlatform/
-// SessionPlatform) lives on metaKV — see meta.go. Store embeds both, so all of these
-// stay promoted onto *Store.
-
-// --- active observation staging (in-session via MCP) ------------------------
-
-// StageObservation records an active (in-session) observation with no quantity
-// cap. The session's worker drains it at session end, passing it through verbatim
-// (authoritative). Duplicate (session, obs_id) rows collapse to one.
-func (s *Store) StageObservation(o Observation) error {
-	_, err := s.StageObservationCapped(o, 0)
-	return err
-}
-
-// StageObservationCapped stages an active observation, enforcing a per-session
-// quantity cap ATOMICALLY (limit <= 0 means unlimited). The count check and the
-// insert are a single statement, so two concurrent MCP processes can't both pass
-// a separate count check and race past the cap. INSERT OR IGNORE collapses a
-// duplicate (session, obs_id) — via idx_staged_unique — so a re-recorded
-// observation is a no-op, not a quota-burning extra row. Returns whether a row was actually
-// inserted (false = at the cap, or a duplicate).
-func (s *Store) StageObservationCapped(o Observation, limit int) (bool, error) {
-	o.Source = "active"
-	payload, err := json.Marshal(o)
-	if err != nil {
-		return false, err
-	}
-	res, err := s.db.Exec(
-		`INSERT OR IGNORE INTO staged(session, obs_id, payload)
-		 SELECT ?, ?, ?
-		 WHERE (? <= 0 OR (SELECT COUNT(*) FROM staged WHERE session = ?) < ?)`,
-		o.Session, o.ID, string(payload), limit, o.Session, limit)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
-// DrainStaged returns staged active observations for a session along with the
-// highest staged id read (throughID). The caller clears exactly those rows via
-// ClearStagedThrough AFTER committing them — bounding by id leaves rows staged
-// concurrently (by a separate MCP process) during the pass for the next drain.
-func (s *Store) DrainStaged(session string) (obs []Observation, throughID int64, err error) {
-	rows, err := s.db.Query(`SELECT id, payload FROM staged WHERE session = ? ORDER BY id`, session)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id int64
-		var payload string
-		if err := rows.Scan(&id, &payload); err != nil {
-			return nil, 0, err
-		}
-		var o Observation
-		if err := json.Unmarshal([]byte(payload), &o); err != nil {
-			continue // one corrupt staged row shouldn't sink the drain
-		}
-		obs = append(obs, o)
-		if id > throughID {
-			throughID = id
-		}
-	}
-	return obs, throughID, rows.Err()
-}
-
-// StagedCount returns how many active observations are currently staged for a
-// session (used to bound how many an in-session agent can record).
-func (s *Store) StagedCount(session string) int {
-	var n int
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM staged WHERE session = ?`, session).Scan(&n)
-	return n
-}
-
-// StagedExists reports whether a specific (session, obs_id) is already staged. It
-// disambiguates the two reasons StageObservationCapped can decline to insert: a
-// benign duplicate (this exact obs is already staged) vs. hitting the per-session
-// cap. Without it, a duplicate recorded while a session happens to be AT the cap
-// was mislabeled as a "too many observations" error (a count>=limit check can't
-// tell the cases apart).
-func (s *Store) StagedExists(session, obsID string) bool {
-	var one int
-	err := s.db.QueryRow(`SELECT 1 FROM staged WHERE session = ? AND obs_id = ? LIMIT 1`, session, obsID).Scan(&one)
-	return err == nil
-}
-
-// ClearStagedThrough removes staged rows up to and including throughID — called
-// ONLY after the worker has committed them to L1 and advanced the watermark, so a
-// crash before the clear just re-drains them (and obsID dedup drops the re-write).
-// On a FAILED pass the worker skips this, so the active obs survive for retry.
-func (s *Store) ClearStagedThrough(session string, throughID int64) {
-	if throughID <= 0 {
-		return
-	}
-	_, _ = s.db.Exec(`DELETE FROM staged WHERE session = ? AND id <= ?`, session, throughID)
-}
-
-// --- the distillation queue (progress / watermark / retries) -----------------
+// queue is the distillation-queue concern: the per-(session, lens) `progress`
+// watermark, retry/backoff bookkeeping, the pending-work query, and the doctor Stats
+// snapshot. A DB leaf — holds only the shared *sql.DB.
 //
 // The watermark is per-(session, lens) (issue #55): each lens tracks how far it has
 // mined a session independently, so enabling a NEW lens backfills only that lens
 // over history without re-mining the always-on `default` (or any other) lens. Every
-// queue op below takes a lens; the #49-C2 raw-generation CAS is preserved, now also
-// matching on lens.
+// queue op takes a lens; the #49-C2 raw-generation CAS is preserved, now also
+// matching on lens. Stats.LastReview reads the `meta` review stamp via the shared
+// metaGet primitive rather than the metaKV type, keeping this concern a leaf.
+type queue struct{ db *sql.DB }
 
 // DistilledCount returns the watermark for one (session, lens): how many L0 records
 // this lens has already mined for the session. 0 if absent (a lens that has never
 // touched this session — e.g. a just-enabled lens — reads 0, so its whole history
 // is pending).
-func (s *Store) DistilledCount(session, lens string) int {
+func (q *queue) DistilledCount(session, lens string) int {
 	var n int
-	_ = s.db.QueryRow(`SELECT distilled FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&n)
+	_ = q.db.QueryRow(`SELECT distilled FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&n)
 	return n
 }
 
@@ -153,12 +56,12 @@ func (s *Store) DistilledCount(session, lens string) int {
 // LENGTH counts UTF-8 characters (consistent with the OpenCode chunker's char
 // budget), a fine proxy for the runner child's footprint. Read-only; 0 for a
 // fully-distilled or absent session.
-func (s *Store) PendingInputChars(session string, lenses []string) int {
+func (q *queue) PendingInputChars(session string, lenses []string) int {
 	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
 	args := append([]any{}, lensArgs...)
 	args = append(args, session, session)
 	var n int
-	_ = s.db.QueryRow(
+	_ = q.db.QueryRow(
 		`WITH active_lens(lens) AS (`+lensValues+`)
 		 SELECT COALESCE(SUM(LENGTH(text)), 0) FROM (
 		   SELECT text FROM raw WHERE session = ? ORDER BY id
@@ -175,26 +78,23 @@ func (s *Store) PendingInputChars(session string, lenses []string) int {
 // or "" if that pair never drifted / has since re-mined cleanly (#69 Part 2). This is
 // the point-read accessor for the persisted per-(session,lens) drift; Stats.Drifted
 // aggregates it. Absent row also reads "".
-func (s *Store) DriftAt(session, lens string) string {
+func (q *queue) DriftAt(session, lens string) string {
 	var at string
-	_ = s.db.QueryRow(`SELECT COALESCE(drift_at, '') FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&at)
+	_ = q.db.QueryRow(`SELECT COALESCE(drift_at, '') FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&at)
 	return at
 }
 
 // MarkDistilled records the watermark (count of L0 records this lens has mined) and
 // stamps when it advanced (for review cadence). Written LAST in Process so a
 // crash mid-distill re-runs the delta; obsID dedup keeps that from duplicating.
-func (s *Store) MarkDistilled(session, lens string, count int) error {
+func (q *queue) MarkDistilled(session, lens string, count int) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := q.db.Exec(
 		`INSERT INTO progress(session, lens, distilled, distilled_at) VALUES (?, ?, ?, ?)
 		 ON CONFLICT(session, lens) DO UPDATE SET distilled = excluded.distilled, distilled_at = excluded.distilled_at`,
 		session, lens, count, now)
 	return err
 }
-
-// MaxRawID (the session's raw "generation" that the watermark CAS gates on) lives on
-// the rawIO concern — see raw.go (issue #73-C1).
 
 // MarkDistilledIfCurrent advances the watermark ONLY if the session's raw is still
 // the exact generation the worker mined — proven by the highest raw.id it read
@@ -216,7 +116,7 @@ func (s *Store) MarkDistilled(session, lens string, count int) error {
 // path. On the append-only Claude path the mined rawHighID always still exists, so
 // the guard always passes — free insurance there, an active fix on the OpenCode/
 // cleanup paths that can delete raw under a mine.
-func (s *Store) MarkDistilledIfCurrent(session, lens string, count int, rawHighID int64) (bool, error) {
+func (q *queue) MarkDistilledIfCurrent(session, lens string, count int, rawHighID int64) (bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	// The guard: only write when a raw row with the mined generation's high id still
 	// exists for this session. rawHighID==0 means the mine saw an empty session
@@ -224,7 +124,7 @@ func (s *Store) MarkDistilledIfCurrent(session, lens string, count int, rawHighI
 	// added rows isn't clobbered. The generation is a property of the session's raw,
 	// not the lens, so the guard is unchanged in spirit — only the row it writes/
 	// conflicts on is now keyed by (session, lens).
-	res, err := s.db.Exec(
+	res, err := q.db.Exec(
 		`INSERT INTO progress(session, lens, distilled, distilled_at)
 		 SELECT ?, ?, ?, ?
 		  WHERE (? = 0 AND NOT EXISTS (SELECT 1 FROM raw WHERE session = ?))
@@ -240,18 +140,18 @@ func (s *Store) MarkDistilledIfCurrent(session, lens string, count int, rawHighI
 
 // RetryCount returns how many times distilling this (session, lens) has failed in a
 // row.
-func (s *Store) RetryCount(session, lens string) int {
+func (q *queue) RetryCount(session, lens string) int {
 	var n int
-	_ = s.db.QueryRow(`SELECT retries FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&n)
+	_ = q.db.QueryRow(`SELECT retries FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&n)
 	return n
 }
 
 // IncRetry bumps the (session, lens) failure count and returns the new value.
-func (s *Store) IncRetry(session, lens string) int {
-	_, _ = s.db.Exec(
+func (q *queue) IncRetry(session, lens string) int {
+	_, _ = q.db.Exec(
 		`INSERT INTO progress(session, lens, retries) VALUES (?, ?, 1)
 		 ON CONFLICT(session, lens) DO UPDATE SET retries = retries + 1`, session, lens)
-	return s.RetryCount(session, lens)
+	return q.RetryCount(session, lens)
 }
 
 // ResetRetry clears the (session, lens) failure count, any backoff, AND any stale
@@ -261,17 +161,17 @@ func (s *Store) IncRetry(session, lens string) int {
 // Stats.Drifted. (The commit path re-stamps drift_at AFTER this reset when the fresh
 // mine itself drifted — see worker.go — so a still-drifting lens is not cleared.)
 // No caller depends on ResetRetry leaving drift_at untouched.
-func (s *Store) ResetRetry(session, lens string) {
-	_, _ = s.db.Exec(`UPDATE progress SET retries = 0, next_attempt = '', drift_at = '' WHERE session = ? AND lens = ?`, session, lens)
+func (q *queue) ResetRetry(session, lens string) {
+	_, _ = q.db.Exec(`UPDATE progress SET retries = 0, next_attempt = '', drift_at = '' WHERE session = ? AND lens = ?`, session, lens)
 }
 
 // SetNextAttempt records the earliest time this (session, lens) should be retried.
 // The pending query excludes the pair until then, so a failing lens backs off
 // instead of being hammered every trigger — and a healthy sibling lens on the same
 // session is unaffected (independent watermarks).
-func (s *Store) SetNextAttempt(session, lens string, at time.Time) error {
+func (q *queue) SetNextAttempt(session, lens string, at time.Time) error {
 	v := at.UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := q.db.Exec(
 		`INSERT INTO progress(session, lens, next_attempt) VALUES (?, ?, ?)
 		 ON CONFLICT(session, lens) DO UPDATE SET next_attempt = excluded.next_attempt`, session, lens, v)
 	return err
@@ -286,9 +186,9 @@ func (s *Store) SetNextAttempt(session, lens string, at time.Time) error {
 // (a drift-only row reads distilled=0, i.e. identical to absent for the pending
 // query — so creating one never falsely marks turns as mined). ResetRetry clears
 // this on a clean re-mine, so a stamp reflects the LAST outcome, not history.
-func (s *Store) SetDrift(session, lens string) error {
+func (q *queue) SetDrift(session, lens string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.db.Exec(
+	_, err := q.db.Exec(
 		`INSERT INTO progress(session, lens, drift_at) VALUES (?, ?, ?)
 		 ON CONFLICT(session, lens) DO UPDATE SET drift_at = excluded.drift_at`, session, lens, now)
 	return err
@@ -302,9 +202,9 @@ func (s *Store) SetDrift(session, lens string) error {
 // long as ANY active lens is behind — but each lens's OWN backoff must still park it,
 // or a failing lens gets re-hammered on every sibling-driven drain). An empty/absent
 // next_attempt reads as not-backed-off, so this is cheap and defaults open.
-func (s *Store) LensBackedOff(session, lens string, now time.Time) bool {
+func (q *queue) LensBackedOff(session, lens string, now time.Time) bool {
 	var next string
-	_ = s.db.QueryRow(
+	_ = q.db.QueryRow(
 		`SELECT COALESCE(next_attempt, '') FROM progress WHERE session = ? AND lens = ?`,
 		session, lens).Scan(&next)
 	if next == "" {
@@ -321,8 +221,8 @@ func (s *Store) LensBackedOff(session, lens string, now time.Time) bool {
 // as pending FOR THAT LENS on the next drain — the enable-a-new-lens backfill path
 // (issue #55). Other lenses' watermarks (rows with a different lens) are untouched,
 // so `default` is never re-mined. Returns rows removed.
-func (s *Store) ResetLensWatermark(lens string) (int, error) {
-	res, err := s.db.Exec(`DELETE FROM progress WHERE lens = ?`, lens)
+func (q *queue) ResetLensWatermark(lens string) (int, error) {
+	res, err := q.db.Exec(`DELETE FROM progress WHERE lens = ?`, lens)
 	if err != nil {
 		return 0, err
 	}
@@ -335,8 +235,8 @@ func (s *Store) ResetLensWatermark(lens string) (int, error) {
 // the durable record and is NOT touched. facet_versions cascade via the ON DELETE
 // CASCADE foreign key. Runs in one transaction so a rebuild never leaves half a
 // lens's derived data behind. Returns (observations, facets) removed.
-func (s *Store) DeleteLensData(lens string) (obs, facets int, err error) {
-	tx, err := s.db.Begin()
+func (q *queue) DeleteLensData(lens string) (obs, facets int, err error) {
+	tx, err := q.db.Begin()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -367,12 +267,12 @@ func (s *Store) DeleteLensData(lens string) (obs, facets int, err error) {
 // backoff row stranded on a since-disabled lens must not schedule a useless wakeup
 // (nor be counted as outstanding work) — the disabled lens is no longer mined, so
 // its old backoff is inert. `lenses` follows the same contract as PendingSessions.
-func (s *Store) NextBackoffAttempt(lenses []string, now time.Time) (time.Time, bool) {
+func (q *queue) NextBackoffAttempt(lenses []string, now time.Time) (time.Time, bool) {
 	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
 	args := append([]any{}, lensArgs...)
 	args = append(args, now.UTC().Format(time.RFC3339))
 	var v string
-	_ = s.db.QueryRow(
+	_ = q.db.QueryRow(
 		`WITH active_lens(lens) AS (`+lensValues+`)
 		 SELECT COALESCE(MIN(p.next_attempt), '')
 		   FROM progress p JOIN active_lens x ON x.lens = p.lens
@@ -397,8 +297,8 @@ func (s *Store) NextBackoffAttempt(lenses []string, now time.Time) (time.Time, b
 // config-enabled-but-unloadable lens can be excluded by the caller (else the query
 // would keep offering a session no worker can actually mine — a no-progress cycle).
 // An empty list falls back to `["default"]` (the always-on lens).
-func (s *Store) PendingSessions(lenses []string) ([]string, error) {
-	return s.PendingSessionsUpdatedBetween(lenses, time.Time{}, time.Time{})
+func (q *queue) PendingSessions(lenses []string) ([]string, error) {
+	return q.PendingSessionsUpdatedBetween(lenses, time.Time{}, time.Time{})
 }
 
 // PendingSessionsUpdatedBetween applies an optional inclusive range to each
@@ -407,7 +307,7 @@ func (s *Store) PendingSessions(lenses []string) ([]string, error) {
 // when ANY active lens is behind on it (raw count > that lens's watermark) and that
 // lens's (session,lens) backoff has elapsed — a per-lens backoff no longer parks
 // the whole session, only that lens's share of it.
-func (s *Store) PendingSessionsUpdatedBetween(lenses []string, since, until time.Time) ([]string, error) {
+func (q *queue) PendingSessionsUpdatedBetween(lenses []string, since, until time.Time) ([]string, error) {
 	lenses = activeLensList(lenses)
 	now := time.Now().UTC().Format(time.RFC3339)
 	sinceValue := ""
@@ -427,7 +327,7 @@ func (s *Store) PendingSessionsUpdatedBetween(lenses []string, since, until time
 	args = append(args, now)         // raw-branch per-lens backoff gate
 	args = append(args, now)         // staged-branch per-lens backoff gate
 	args = append(args, sinceValue, sinceValue, untilValue, untilValue)
-	rows, err := s.db.Query(
+	rows, err := q.db.Query(
 		`WITH active_lens(lens) AS (`+lensValues+`),
 		  candidates AS (
 		   SELECT l.session
@@ -517,17 +417,17 @@ type Stats struct {
 // sessions for which some active lens is behind, so the doctor count matches what
 // the worker will actually drain. BackedOff counts distinct sessions that have at
 // least one (session,lens) currently sleeping on a retry backoff.
-func (s *Store) Stats(lenses []string) Stats {
+func (q *queue) Stats(lenses []string) Stats {
 	now := time.Now().UTC().Format(time.RFC3339)
 	var st Stats
-	_ = s.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM raw`).Scan(&st.Sessions)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM raw`).Scan(&st.RawRecords)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&st.Observations)
-	_ = s.db.QueryRow(`SELECT COUNT(*) FROM facets`).Scan(&st.Facets)
+	_ = q.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM raw`).Scan(&st.Sessions)
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM raw`).Scan(&st.RawRecords)
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM observations`).Scan(&st.Observations)
+	_ = q.db.QueryRow(`SELECT COUNT(*) FROM facets`).Scan(&st.Facets)
 	lensValues, lensArgs := lensValuesClause(activeLensList(lenses))
 	args := append([]any{}, lensArgs...)
 	args = append(args, now, now)
-	_ = s.db.QueryRow(
+	_ = q.db.QueryRow(
 		`WITH active_lens(lens) AS (`+lensValues+`)
 		 SELECT COUNT(*) FROM (
 		   SELECT l.session
@@ -550,7 +450,7 @@ func (s *Store) Stats(lenses []string) Stats {
 	backoffValues, backoffArgs := lensValuesClause(activeLensList(lenses))
 	bargs := append([]any{}, backoffArgs...)
 	bargs = append(bargs, now)
-	_ = s.db.QueryRow(
+	_ = q.db.QueryRow(
 		`WITH active_lens(lens) AS (`+backoffValues+`)
 		 SELECT COUNT(DISTINCT p.session)
 		   FROM progress p JOIN active_lens x ON x.lens = p.lens
@@ -561,128 +461,7 @@ func (s *Store) Stats(lenses []string) Stats {
 	// so it counts wherever it was recorded; a clean re-mine clears it via ResetRetry.
 	// A plain COUNT(DISTINCT) is cheap at this scale (no dedicated index — the drift_at
 	// != '' predicate is a rare-true filter over the small progress table).
-	_ = s.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM progress WHERE drift_at != ''`).Scan(&st.Drifted)
-	st.LastReview = metaGet(s.db, "review_ts")
+	_ = q.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM progress WHERE drift_at != ''`).Scan(&st.Drifted)
+	st.LastReview = metaGet(q.db, "review_ts")
 	return st
 }
-
-// Cross-process advisory locks (WorkerLock/WorkerActive/ImportLock) live on the
-// procLocks concern — see locks.go (issue #73-C1). Store embeds procLocks, so those
-// methods stay promoted onto *Store.
-
-// --- observations ---------------------------------------------------------
-
-// AppendObservations appends the worker's combined output. obs_id is the PRIMARY
-// KEY, so INSERT OR IGNORE makes the whole write idempotent: re-drained active
-// obs and identical re-mines after a crash are dropped, not duplicated.
-func (s *Store) AppendObservations(obs []Observation) error {
-	if len(obs) == 0 {
-		return nil
-	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	stmt, err := tx.Prepare(
-		`INSERT OR IGNORE INTO observations
-		   (obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source, embedding)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-	defer stmt.Close()
-	for _, o := range obs {
-		if _, err := stmt.Exec(o.ID, o.TS, o.Session, o.Lens, o.Dimension, o.Observation,
-			o.Evidence, o.Poignancy, o.Source, encodeEmbedding(o.Embedding)); err != nil {
-			tx.Rollback()
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-// DeleteObservation removes one L1 observation by obs_id, reporting whether a row
-// was actually deleted (false = no such id, not an error). Facets are reviewer-
-// owned and read-only to humans; pruning a wrong/stale observation here is the
-// supported way to correct the profile — the next review re-derives from what's
-// left. Durable against re-mining: the per-session watermark won't re-mine an
-// already-distilled delta, and obs_id dedup would catch it even if it did.
-func (s *Store) DeleteObservation(obsID string) (bool, error) {
-	res, err := s.db.Exec(`DELETE FROM observations WHERE obs_id = ?`, obsID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
-}
-
-// The raw-pruning ops (RawPruneStats/PruneSessionsBefore) live on the rawIO concern —
-// see raw.go (issue #73-C1). They act on the L0 transcript (deleting whole stale
-// sessions), so they belong with the raw layer, not the observation layer.
-
-// ReadObservationsLite is ReadObservations without decoding embeddings — for
-// scans that never use the vectors (the reviewer, which slims them off anyway),
-// avoiding loading 384 float32s per row across the whole corpus.
-func (s *Store) ReadObservationsLite(lens string) ([]Observation, error) {
-	q := `SELECT obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source
-	        FROM observations`
-	var args []any
-	if lens != "" {
-		q += ` WHERE lens = ?`
-		args = append(args, lens)
-	}
-	q += ` ORDER BY rowid`
-	rows, err := s.db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Observation
-	for rows.Next() {
-		var o Observation
-		if err := rows.Scan(&o.ID, &o.TS, &o.Session, &o.Lens, &o.Dimension, &o.Observation,
-			&o.Evidence, &o.Poignancy, &o.Source); err != nil {
-			return nil, err
-		}
-		out = append(out, o)
-	}
-	return out, rows.Err()
-}
-
-// ReadObservations returns all L1 observations (optionally one lens), in insertion
-// order (rowid), embeddings decoded.
-func (s *Store) ReadObservations(lens string) ([]Observation, error) {
-	q := `SELECT obs_id, ts, session, lens, dimension, observation, evidence, poignancy, source, embedding
-	        FROM observations`
-	var args []any
-	if lens != "" {
-		q += ` WHERE lens = ?`
-		args = append(args, lens)
-	}
-	q += ` ORDER BY rowid`
-	rows, err := s.db.Query(q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Observation
-	for rows.Next() {
-		var o Observation
-		var emb []byte
-		if err := rows.Scan(&o.ID, &o.TS, &o.Session, &o.Lens, &o.Dimension, &o.Observation,
-			&o.Evidence, &o.Poignancy, &o.Source, &emb); err != nil {
-			return nil, err
-		}
-		o.Embedding = decodeEmbedding(emb)
-		out = append(out, o)
-	}
-	return out, rows.Err()
-}
-
-// The L2 facet IO (ReadFacets/WriteFacets) lives on the facetIO concern — see
-// facets.go (issue #73-C1). Store embeds facetIO, so those methods stay promoted
-// onto *Store.
