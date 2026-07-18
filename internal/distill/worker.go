@@ -381,10 +381,12 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 			continue
 		}
 		// A drifted lens advances just like a successful one (its data outcome — zero obs
-		// for this delta — is identical to the pre-#57 silent behavior). We only tally it
-		// so the drift can be surfaced (doctor + backfill summary): drift is NOT a
-		// transport failure, so it must NOT back off (that would re-hammer a
-		// deterministically-below-floor model forever and wedge the backfill queue).
+		// for this delta — is identical to the pre-#57 silent behavior). We tally it here
+		// for the archive-wide meta counter (RecordDrift, below); the per-(session,lens)
+		// drift_at stamp (#69 Part 2) is written after this lens's CAS advance so it can be
+		// gated on that advance individually. Drift is NOT a transport failure, so it must
+		// NOT back off (that would re-hammer a deterministically-below-floor model forever
+		// and wedge the backfill queue).
 		if lm.Drifted {
 			driftCount++
 			lastDriftLens = lm.Lens
@@ -396,6 +398,20 @@ func (w *Worker) CommitMining(m *SessionMining, existing *[]store.Observation) e
 		}
 		if advanced {
 			generationCurrent = true
+			// Persist this lens's drift stamp AFTER ResetRetry cleared any stale one (#69
+			// Part 2). ResetRetry runs above and blanks drift_at (a clean re-mine forgets
+			// old drift); re-stamping here for a lens that drifted on THIS pass makes the
+			// persisted drift_at reflect the LATEST outcome, so Stats.Drifted/doctor show a
+			// currently-drifting lens and drop one that recovered. Gated on `advanced` for
+			// the same reason the meta counter below gates on generationCurrent: a drift over
+			// a since-replaced generation didn't really happen for the archive (the session
+			// re-mines the new one). Best-effort — a stamp hiccup must never fail a commit
+			// whose L1/watermark writes already landed.
+			if lm.Drifted {
+				if err := w.Store.SetDrift(m.Session, lm.Lens); err != nil {
+					slog.Warn("distill: could not stamp per-lens drift", "session", m.Session, "lens", lm.Lens, "err", err)
+				}
+			}
 		} else {
 			slog.Warn("distill: raw changed under mine; lens watermark held, will re-mine",
 				"session", m.Session, "lens", lm.Lens, "mined_to", m.Total)

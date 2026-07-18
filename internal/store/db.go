@@ -26,8 +26,12 @@ import (
 // idx_progress_distilled_at, issue #73-S3) via addProgressIndexes — a guarded,
 // idempotent migrate() step that runs AFTER the v5 rebuild (the indexes reference
 // the `lens` column that rebuild creates; putting them in schemaV1 would fail on a
-// pre-v5 DB and the rebuild's DROP TABLE would drop them anyway).
-const schemaVersion = 6
+// pre-v5 DB and the rebuild's DROP TABLE would drop them anyway); v7 adds
+// progress.drift_at (issue #69 Part 2), an RFC3339 stamp of a per-(session,lens)
+// prose-drift so drift survives across worker runs and is queryable (empty = never
+// drifted) via a guarded ADD COLUMN in migrate() (addDriftColumn) — this persists
+// the previously in-memory-only LensMining.Drifted signal.
+const schemaVersion = 7
 
 func (s *Store) dbPath() string { return filepath.Join(s.Root, "witness.db") }
 
@@ -202,6 +206,20 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("v6 progress indexes: %w", err)
 	}
 
+	// 6. v6 -> v7: progress.drift_at (issue #69 Part 2) — persist the last
+	// per-(session,lens) prose-drift stamp so it survives worker restarts instead of
+	// living only in the in-memory LensMining.Drifted flag. schemaV1's CREATE ... IF
+	// NOT EXISTS won't alter an existing progress table, so add the column explicitly
+	// (SQLite has no ADD COLUMN IF NOT EXISTS — guard on pragma_table_info like the v4
+	// platform column). Runs AFTER migrateProgressPerLens so the table it targets is
+	// already the per-lens shape (a pre-v5 rebuild would drop a column added earlier).
+	// Idempotent: the guard skips the ALTER once the column exists; fresh DBs already
+	// have it from schemaV1.
+	if err := addDriftColumn(tx); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("v7 add progress.drift_at: %w", err)
+	}
+
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 		tx.Rollback()
 		return fmt.Errorf("set user_version: %w", err)
@@ -284,10 +302,14 @@ func migrateProgressPerLens(tx *sql.Tx) error {
 		   retries      INTEGER NOT NULL DEFAULT 0,
 		   distilled_at TEXT    NOT NULL DEFAULT '',
 		   next_attempt TEXT    NOT NULL DEFAULT '',
+		   drift_at     TEXT    NOT NULL DEFAULT '',
 		   PRIMARY KEY (session, lens)
 		 )`,
-		`INSERT INTO progress(session, lens, distilled, retries, distilled_at, next_attempt)
-		   SELECT session, 'default', distilled, retries, distilled_at, next_attempt
+		// drift_at (v7) is created here too so a v4->v7 migration lands the same table
+		// shape as a fresh schemaV1 DB. progress_v4 predates drift tracking, so the copy
+		// stamps '' (never drifted) explicitly rather than selecting a nonexistent column.
+		`INSERT INTO progress(session, lens, distilled, retries, distilled_at, next_attempt, drift_at)
+		   SELECT session, 'default', distilled, retries, distilled_at, next_attempt, ''
 		     FROM progress_v4`,
 		`DROP TABLE progress_v4`,
 	}
@@ -322,6 +344,29 @@ func addProgressIndexes(tx *sql.Tx) error {
 	} {
 		if _, err := tx.Exec(q); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// addDriftColumn is the v6->v7 step: add progress.drift_at if the running DB's
+// table predates it (issue #69 Part 2). A pre-v7 progress table has no drift_at;
+// schemaV1's CREATE ... IF NOT EXISTS won't alter it, so add the column explicitly
+// (SQLite has no ADD COLUMN IF NOT EXISTS — guard on pragma_table_info, mirroring
+// addSessionPlatformColumn). The column-level empty-string DEFAULT gives every
+// existing row a concrete "never drifted" value with no backfill needed. Idempotent: the guard
+// skips the ALTER once the column exists (fresh DBs have it from schemaV1; a re-run
+// sees it too).
+func addDriftColumn(tx *sql.Tx) error {
+	var hasColumn int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('progress') WHERE name='drift_at'`,
+	).Scan(&hasColumn); err != nil {
+		return fmt.Errorf("probe drift_at column: %w", err)
+	}
+	if hasColumn == 0 {
+		if _, err := tx.Exec(`ALTER TABLE progress ADD COLUMN drift_at TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add column: %w", err)
 		}
 	}
 	return nil
@@ -405,6 +450,7 @@ CREATE TABLE IF NOT EXISTS progress (
   retries      INTEGER NOT NULL DEFAULT 0,
   distilled_at TEXT    NOT NULL DEFAULT '',
   next_attempt TEXT    NOT NULL DEFAULT '',
+  drift_at     TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (session, lens)
 );
 -- The progress hot-path indexes (issue #73-S3) are NOT here: they reference the

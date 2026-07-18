@@ -396,6 +396,16 @@ func (s *Store) DistilledCount(session, lens string) int {
 	return n
 }
 
+// DriftAt returns the RFC3339 stamp of the last prose-drift for one (session, lens),
+// or "" if that pair never drifted / has since re-mined cleanly (#69 Part 2). This is
+// the point-read accessor for the persisted per-(session,lens) drift; Stats.Drifted
+// aggregates it. Absent row also reads "".
+func (s *Store) DriftAt(session, lens string) string {
+	var at string
+	_ = s.db.QueryRow(`SELECT COALESCE(drift_at, '') FROM progress WHERE session = ? AND lens = ?`, session, lens).Scan(&at)
+	return at
+}
+
 // MarkDistilled records the watermark (count of L0 records this lens has mined) and
 // stamps when it advanced (for review cadence). Written LAST in Process so a
 // crash mid-distill re-runs the delta; obsID dedup keeps that from duplicating.
@@ -478,10 +488,15 @@ func (s *Store) IncRetry(session, lens string) int {
 	return s.RetryCount(session, lens)
 }
 
-// ResetRetry clears the (session, lens) failure count and any backoff (a clean
-// distill).
+// ResetRetry clears the (session, lens) failure count, any backoff, AND any stale
+// prose-drift stamp (a clean distill). Clearing drift_at here is the recovery path
+// for #69 Part 2: once a lens re-mines this session successfully, the previously
+// recorded drift no longer reflects reality, so it stops counting toward
+// Stats.Drifted. (The commit path re-stamps drift_at AFTER this reset when the fresh
+// mine itself drifted — see worker.go — so a still-drifting lens is not cleared.)
+// No caller depends on ResetRetry leaving drift_at untouched.
 func (s *Store) ResetRetry(session, lens string) {
-	_, _ = s.db.Exec(`UPDATE progress SET retries = 0, next_attempt = '' WHERE session = ? AND lens = ?`, session, lens)
+	_, _ = s.db.Exec(`UPDATE progress SET retries = 0, next_attempt = '', drift_at = '' WHERE session = ? AND lens = ?`, session, lens)
 }
 
 // SetNextAttempt records the earliest time this (session, lens) should be retried.
@@ -493,6 +508,23 @@ func (s *Store) SetNextAttempt(session, lens string, at time.Time) error {
 	_, err := s.db.Exec(
 		`INSERT INTO progress(session, lens, next_attempt) VALUES (?, ?, ?)
 		 ON CONFLICT(session, lens) DO UPDATE SET next_attempt = excluded.next_attempt`, session, lens, v)
+	return err
+}
+
+// SetDrift stamps the (session, lens) row with the current time (RFC3339) to record
+// that this pass drifted — the model returned no observation array for this lens
+// (issue #69 Part 2). Persisting it lets Stats.Drifted / doctor report which
+// sessions currently sit at a drift, surviving worker restarts, where the meta
+// counter (RecordDrift) only tracks a lifetime event total. Upsert-safe like
+// SetNextAttempt so it records drift whether or not a progress row exists yet
+// (a drift-only row reads distilled=0, i.e. identical to absent for the pending
+// query — so creating one never falsely marks turns as mined). ResetRetry clears
+// this on a clean re-mine, so a stamp reflects the LAST outcome, not history.
+func (s *Store) SetDrift(session, lens string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.Exec(
+		`INSERT INTO progress(session, lens, drift_at) VALUES (?, ?, ?)
+		 ON CONFLICT(session, lens) DO UPDATE SET drift_at = excluded.drift_at`, session, lens, now)
 	return err
 }
 
@@ -710,6 +742,7 @@ type Stats struct {
 	Facets       int    // L2
 	Pending      int    // sessions with undistilled turns, eligible now
 	BackedOff    int    // sessions waiting out a retry backoff (mining is failing)
+	Drifted      int    // distinct sessions with a lens currently sitting at a prose-drift (#69 Part 2)
 	LastReview   string // RFC3339 of the last reviewer run ("" = never)
 }
 
@@ -756,6 +789,13 @@ func (s *Store) Stats(lenses []string) Stats {
 		 SELECT COUNT(DISTINCT p.session)
 		   FROM progress p JOIN active_lens x ON x.lens = p.lens
 		  WHERE p.next_attempt != '' AND p.next_attempt > ?`, bargs...).Scan(&st.BackedOff)
+	// Drifted: distinct sessions with ANY lens currently sitting at a prose-drift
+	// stamp (#69 Part 2). Unlike Pending/BackedOff this is NOT scoped to the active
+	// lens set — a drift is a persisted fact about a past mine of that (session,lens),
+	// so it counts wherever it was recorded; a clean re-mine clears it via ResetRetry.
+	// A plain COUNT(DISTINCT) is cheap at this scale (no dedicated index — the drift_at
+	// != '' predicate is a rare-true filter over the small progress table).
+	_ = s.db.QueryRow(`SELECT COUNT(DISTINCT session) FROM progress WHERE drift_at != ''`).Scan(&st.Drifted)
 	st.LastReview = s.metaStr("review_ts")
 	return st
 }

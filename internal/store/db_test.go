@@ -255,6 +255,113 @@ func TestMigrateAddsProgressIndexes(t *testing.T) {
 	}
 }
 
+// hasColumn reports whether a named column exists on a table.
+func hasColumn(t *testing.T, s *Store, table, col string) bool {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, table, col).Scan(&n); err != nil {
+		t.Fatalf("probe %s.%s: %v", table, col, err)
+	}
+	return n > 0
+}
+
+// v6 -> v7 (issue #69 Part 2) adds progress.drift_at. A pre-v7 DB has progress
+// WITHOUT the column; migrate() must ADD it (guarded ALTER), leave existing rows at
+// the empty-string default (never drifted), and preserve their data. Non-destructive, idempotent.
+func TestMigrateAddsDriftColumn(t *testing.T) {
+	s := tempStore(t) // fully migrated (progress has drift_at)
+	if !hasColumn(t, s, "progress", "drift_at") {
+		t.Fatal("fresh DB missing progress.drift_at")
+	}
+
+	// Simulate a stored-v6 archive: rebuild progress WITHOUT drift_at (but WITH the
+	// v5 lens column so migrateProgressPerLens stays a no-op), seed a watermark row,
+	// and force the version back to 6 so migrate() re-runs the v7 step.
+	for _, stmt := range []string{
+		`DROP TABLE progress`,
+		`CREATE TABLE progress (session TEXT NOT NULL, lens TEXT NOT NULL DEFAULT 'default',
+			distilled INTEGER NOT NULL DEFAULT 0, retries INTEGER NOT NULL DEFAULT 0,
+			distilled_at TEXT NOT NULL DEFAULT '', next_attempt TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (session, lens))`,
+		`INSERT INTO progress(session, lens, distilled, retries) VALUES ('sess', 'default', 5, 1)`,
+		`PRAGMA user_version=6`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v6 (%q): %v", stmt, err)
+		}
+	}
+	if hasColumn(t, s, "progress", "drift_at") {
+		t.Fatal("precondition: drift_at should be absent before re-migrate")
+	}
+
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v6->v7 migrate: %v", err)
+	}
+
+	// Column added, the pre-existing row survived with the '' (never-drifted) default,
+	// and its other watermark fields are intact.
+	if !hasColumn(t, s, "progress", "drift_at") {
+		t.Fatal("v6->v7 migrate did not add progress.drift_at")
+	}
+	if got := s.DriftAt("sess", LensDefault); got != "" {
+		t.Fatalf("a migrated row must default to '' (never drifted), got %q", got)
+	}
+	if got := s.DistilledCount("sess", LensDefault); got != 5 {
+		t.Fatalf("watermark lost across v7 migrate: got %d, want 5", got)
+	}
+	if got := s.RetryCount("sess", LensDefault); got != 1 {
+		t.Fatalf("retries lost across v7 migrate: got %d, want 1", got)
+	}
+	var v int
+	_ = s.db.QueryRow("PRAGMA user_version").Scan(&v)
+	if v != schemaVersion {
+		t.Fatalf("user_version = %d, want %d", v, schemaVersion)
+	}
+
+	// Idempotent: re-running migrate over the applied v7 schema (version forced back)
+	// must not error, re-add, or lose the row.
+	if _, err := s.db.Exec("PRAGMA user_version=6"); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("re-run migrate must be idempotent: %v", err)
+	}
+	if got := s.DistilledCount("sess", LensDefault); got != 5 {
+		t.Fatalf("watermark lost on idempotent re-run: got %d", got)
+	}
+}
+
+// A pre-v5 DB (single-key progress) migrated all the way to v7 must land the SAME
+// table shape as a fresh DB — including drift_at, defaulted to empty for the copied
+// 'default'-lens rows (progress_v4 predates drift, so the rebuild seeds an empty stamp).
+func TestMigrateV4ToV7SeedsDriftAtBlank(t *testing.T) {
+	s := tempStore(t)
+	for _, stmt := range []string{
+		`DROP TABLE progress`,
+		`CREATE TABLE progress (session TEXT PRIMARY KEY, distilled INTEGER NOT NULL DEFAULT 0,
+			retries INTEGER NOT NULL DEFAULT 0, distilled_at TEXT NOT NULL DEFAULT '', next_attempt TEXT NOT NULL DEFAULT '')`,
+		`INSERT INTO progress(session, distilled) VALUES ('sess', 5)`,
+		`PRAGMA user_version=4`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			t.Fatalf("seed v4 (%q): %v", stmt, err)
+		}
+	}
+	if err := migrate(s.db); err != nil {
+		t.Fatalf("v4->v7 migrate: %v", err)
+	}
+	if !hasColumn(t, s, "progress", "drift_at") {
+		t.Fatal("v4->v7 migrate must land drift_at (fresh-DB parity)")
+	}
+	if got := s.DriftAt("sess", LensDefault); got != "" {
+		t.Fatalf("rebuilt default-lens row must seed drift_at='', got %q", got)
+	}
+	if got := s.DistilledCount("sess", LensDefault); got != 5 {
+		t.Fatalf("watermark preserved across v4->v7: got %d, want 5", got)
+	}
+}
+
 // SetSessionPlatform upserts even when no session_meta row exists yet (CC sessions
 // have none until now), and SessionPlatform reads it back.
 func TestSetSessionPlatformUpsert(t *testing.T) {
