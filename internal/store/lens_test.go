@@ -345,19 +345,16 @@ func TestSetLensRunnerRoundTrip(t *testing.T) {
 	}
 }
 
-// Both reserved names must be refused at register AND enable: "unified" (the
-// cross-lens summary's filename stem — its per-lens summary would clobber the
-// unified portrait) and "default" (the always-on built-in's identity — a second
-// lens under this name would share the built-in's (session,'default') watermark +
-// observation key and corrupt the backbone lens). This is the identity-layer guard
-// that keeps default's NAME protected even though the engine treats every lens's
-// BEHAVIOR identically.
+// Since #44 slice 1a exactly ONE name is reserved and must be refused at register AND
+// enable: "unified" (the cross-lens summary's filename stem — a per-lens summary under
+// it would clobber the unified portrait). "default" is now an ordinary lens and must be
+// ACCEPTED (register + enable). This locks the post-1a identity-layer rule.
 func TestReservedLensNamesRejected(t *testing.T) {
-	// Include case variants: on case-insensitive filesystems (macOS/Windows) a
-	// "Default" lens's profile file (Default.md) collides with the built-in's
-	// (default.md), so the guard must fold case and reject these too — else the
-	// registered lens's summary silently clobbers the built-in's.
-	for _, name := range []string{"unified", "default", "Default", "UNIFIED", "Unified"} {
+	// Only "unified" is reserved (it is the cross-lens profile filename stem, not a
+	// lens). Case variants included: on case-insensitive filesystems (macOS/Windows)
+	// "Unified.md" collides with "unified.md", so the guard folds case. Since #44 slice
+	// 1a "default" is NO LONGER reserved — it is an ordinary registered lens.
+	for _, name := range []string{"unified", "UNIFIED", "Unified", "uNiFiEd"} {
 		t.Run(name, func(t *testing.T) {
 			s := tempStore(t)
 			src := writeLensSrcDir(t, name, "x", "y")
@@ -375,17 +372,74 @@ func TestReservedLensNamesRejected(t *testing.T) {
 			}
 		})
 	}
-	if !ReservedLensName("default") || !ReservedLensName("unified") {
-		t.Fatal("ReservedLensName must report both reserved names")
+	// "default" is now an ORDINARY lens: registerable + enableable, and NOT reported
+	// reserved (any case variant).
+	for _, name := range []string{"default", "Default", "DEFAULT"} {
+		t.Run("allowed/"+name, func(t *testing.T) {
+			s := tempStore(t)
+			src := writeLensSrcDir(t, "default", "x", "y") // registry key is the slug "default"
+			if err := s.RegisterLens("default", src); err != nil {
+				t.Fatalf("registering the ordinary default lens must succeed: %v", err)
+			}
+			if !slices.Contains(s.RegisteredLenses(), "default") {
+				t.Fatal("default lens must be written to the registry")
+			}
+			if err := s.EnableLens("default"); err != nil {
+				t.Fatalf("enabling the default lens must succeed: %v", err)
+			}
+			if ReservedLensName(name) {
+				t.Fatalf("ReservedLensName(%q) must be false since #44 slice 1a", name)
+			}
+		})
 	}
-	// Case-folded: mixed/upper-case variants of the reserved names are also reserved.
-	for _, v := range []string{"Default", "DEFAULT", "Unified", "UNIFIED", "uNiFiEd"} {
+	if ReservedLensName("default") || !ReservedLensName("unified") {
+		t.Fatal("only 'unified' is reserved now; 'default' is an ordinary lens")
+	}
+	// Case-folded: only unified's case variants are reserved.
+	for _, v := range []string{"Unified", "UNIFIED", "uNiFiEd"} {
 		if !ReservedLensName(v) {
 			t.Fatalf("ReservedLensName(%q) must be true (case-insensitive)", v)
 		}
 	}
 	if ReservedLensName("math") {
 		t.Fatal("ReservedLensName must not reserve an ordinary lens name")
+	}
+}
+
+// TestRegisterRejectsCaseCollision is the regression guard for the adversarial finding
+// that, once "default" became registerable, `register Default` on a case-insensitive
+// filesystem (macOS APFS / Windows NTFS) would reuse and CLOBBER `default`'s registry
+// dir. RegisterLens now refuses a name that case-insensitively collides with an already-
+// registered lens under a different casing (protecting ANY lens, not just default),
+// while still allowing an exact-case re-register (an intentional overwrite/update).
+func TestRegisterCaseCollision(t *testing.T) {
+	s := tempStore(t)
+	if err := s.RegisterLens("default", writeLensSrcDir(t, "default", "x", "y")); err != nil {
+		t.Fatalf("register default: %v", err)
+	}
+	// A different-case variant must be REFUSED (would clobber default's dir on APFS/NTFS).
+	for _, variant := range []string{"Default", "DEFAULT", "deFAULT"} {
+		if err := s.RegisterLens(variant, writeLensSrcDir(t, variant, "a", "b")); err == nil {
+			t.Fatalf("register %q must be refused (case-collides with the registered 'default')", variant)
+		}
+	}
+	// Same lens still registered exactly once, unclobbered.
+	n := 0
+	for _, r := range s.RegisteredLenses() {
+		if strings.EqualFold(r, "default") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("default must remain registered exactly once after refused collisions, got %d", n)
+	}
+	// Exact-case re-register is still allowed (intentional overwrite).
+	if err := s.RegisterLens("default", writeLensSrcDir(t, "default", "x2", "y2")); err != nil {
+		t.Fatalf("exact-case re-register must be allowed: %v", err)
+	}
+	// An unrelated name is unaffected.
+	if err := s.RegisterLens("market", writeLensSrcDir(t, "market", "m", "r")); err != nil {
+		t.Fatalf("register unrelated lens: %v", err)
 	}
 }
 

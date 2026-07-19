@@ -15,15 +15,17 @@
 // global (runs on every session); repo lenses are scoped (opt-in per repo).
 package store
 
-// Reserved-name constants — the single source of truth for the two special names,
-// in the data layer (every store-side check and the lens loader route through them).
-// Both are reserved from the registry (see ReservedLensName), but they name DIFFERENT
-// kinds of thing — hence the different prefixes:
-//   - LensDefault IS a lens (the always-on built-in one).
+// Name constants — the single source of truth for the two special names, in the data
+// layer (every store-side check and the lens loader route through them). Since #44
+// slice 1a only ProfileUnified is RESERVED; LensDefault is an ordinary lens name kept
+// here as a constant because the seed/migration reference it:
+//   - LensDefault IS a lens (the person-growth scaffold witness seeds — an ordinary
+//     registered lens with no always-on privilege since #44 slice 1a).
 //   - ProfileUnified is NOT a lens; it is the reserved filename stem of the cross-lens
 //     profile aggregate. Naming it Lens* would be a misnomer — nothing mines "unified".
 const (
-	// LensDefault is the always-on, cross-domain built-in lens.
+	// LensDefault is the name of the seeded person-growth lens (an ordinary registered
+	// lens since #44 slice 1a; the seed/migration + install scaffold reference it).
 	LensDefault = "default"
 	// ProfileUnified is the filename stem of the cross-lens profile summary
 	// (profile/unified.md) — an aggregate VIEW blending every lens, NOT a lens a

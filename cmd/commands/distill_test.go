@@ -44,6 +44,12 @@ func TestDistillBackfillFailsWhenWorkRemains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Scaffold the default lens (since #44 slice 1a it's no longer always-on, so a fresh
+	// archive has NO active lens and nothing would be pending). This makes the appended
+	// session pending FOR that lens — the condition under test.
+	if err := seedDefaultLens(st); err != nil {
+		t.Fatalf("seedDefaultLens: %v", err)
+	}
 	// Leave a pending session in L0 (no model → it can never be distilled here).
 	if err := st.AppendRaw(store.RawRecord{Session: "s", Seq: 0, Role: "user", Text: "hi"}); err != nil {
 		t.Fatal(err)

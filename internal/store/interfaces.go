@@ -155,6 +155,7 @@ type SummaryStore interface {
 	ReadFacets() ([]Facet, error)
 	ReadProfile(lens string) (string, bool, error)
 	WriteProfile(lens, markdown string) error
+	DeleteProfile(lens string) error
 }
 
 // Compile-time proof that *Store satisfies every consumer interface. If a concern

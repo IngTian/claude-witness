@@ -478,12 +478,12 @@ func (c *configFile) ReviewDue(cfg Config) bool {
 
 // EnableLens adds a lens name to the globally-enabled set (idempotent). It runs
 // on every session thereafter. Rewrites config.toml, preserving all other lines.
-// A reserved name (the always-on built-in / the unified summary) is refused:
-// belt-and-suspenders alongside RegisterLens, so even a config hand-edit that
-// slipped a reserved name into the registry can't enable it into the active set.
+// The reserved "unified" name is refused: belt-and-suspenders alongside RegisterLens,
+// so even a config hand-edit that slipped it into the registry can't enable it into the
+// active set. ("default" is an ordinary lens since #44 slice 1a and enables normally.)
 func (c *configFile) EnableLens(name string) error {
 	if ReservedLensName(name) {
-		return fmt.Errorf("lens name %q is reserved and cannot be enabled (the built-in %q lens always runs)", name, LensDefault)
+		return fmt.Errorf("lens name %q is reserved (the cross-lens 'unified' summary) and cannot be enabled", name)
 	}
 	return c.rewriteEnabledLens(name, true)
 }
