@@ -43,6 +43,20 @@ func (q *queue) HasLegacyDefaultData() bool {
 	return n > 0
 }
 
+// IsEmptyArchive reports whether this archive has never captured or distilled
+// anything: no L0 raw rows AND no per-(session,lens) progress watermarks. It is the
+// "brand-new archive" signal the first-open default-seed keys on together with an
+// empty lens registry — a fresh personal install (install opens the store to bind the
+// runner before any capture) reads empty here, whereas a library-mode archive that has
+// already ingested records + mined its own domain lens does NOT (so default is never
+// forced onto it). Read-only.
+func (q *queue) IsEmptyArchive() bool {
+	var n int
+	_ = q.db.QueryRow(`SELECT
+		(SELECT COUNT(*) FROM raw) + (SELECT COUNT(*) FROM progress)`).Scan(&n)
+	return n == 0
+}
+
 // PendingInputChars returns the character size of a session's LARGEST undistilled
 // per-lens delta among the ACTIVE lenses: SUM(LENGTH(text)) over the raw rows past
 // the MINIMUM watermark those lenses hold on the session (an absent (session,lens)
