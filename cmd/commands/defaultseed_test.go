@@ -102,6 +102,43 @@ func TestLibraryOptOutSkipsAndSticks(t *testing.T) {
 	}
 }
 
+// TestPartialSeedCompletesOnNextOpen is the regression guard for the correctness-review
+// finding: if a first-Open seed got HALFWAY (RegisterLens succeeded, EnableLens failed →
+// marker left unset for retry), the NEXT Open must FINISH it (re-enable), not silently
+// leave default registered-but-disabled with the one-shot burned. The trap was that once
+// default is registered, the `IsEmptyArchive() && 0-registered` gate is false, so the old
+// code fell into the "n/a" branch and never re-enabled. We simulate the partial state
+// directly: register default, disable it, clear the marker — then Open must ensure enabled.
+func TestPartialSeedCompletesOnNextOpen(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "witness")
+	s := openSeedTestStore(t, home) // fresh open seeds + enables + stamps the marker
+	// Simulate a PARTIAL prior seed: registered but disabled, and the one-shot NOT yet set
+	// (EnableLens is the step that "failed"). Since any Open stamps the marker, this state
+	// is only reachable as an unfinished seed — never a user disable (which happens after).
+	if err := s.DisableLens(store.LensDefault); err != nil {
+		t.Fatalf("DisableLens: %v", err)
+	}
+	if err := s.SetMetaString(defaultMigratedKey, ""); err != nil {
+		t.Fatalf("clear marker: %v", err)
+	}
+	if !slices.Contains(s.RegisteredLenses(), store.LensDefault) {
+		t.Fatal("precondition: default should still be registered (partial seed)")
+	}
+	if slices.Contains(s.LoadConfig().EnabledLenses, store.LensDefault) {
+		t.Fatal("precondition: default should be disabled (the EnableLens step 'failed')")
+	}
+	_ = s.Close()
+
+	// Re-open → the hook must COMPLETE the seed: default registered AND enabled, marker set.
+	s2 := openSeedTestStore(t, home)
+	if !slices.Contains(s2.LoadConfig().EnabledLenses, store.LensDefault) {
+		t.Fatal("a partial seed (registered, marker unset) must be COMPLETED (re-enabled) on the next Open, not left disabled")
+	}
+	if got := s2.MetaString(defaultMigratedKey); got != "done" {
+		t.Fatalf("completing a partial seed must stamp the one-shot as done; got %q", got)
+	}
+}
+
 // TestDefaultSeedMigratesPre1aArchive is the #44 slice-1a migration guard: an archive
 // that distilled under the OLD always-on default lens (a progress row for lens
 // "default", but no lenses/default/ registry dir) must, on the next Open, have default

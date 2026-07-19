@@ -288,8 +288,8 @@ func (q *queue) ActiveObservationCount(lens string) int {
 // DeleteLensData removes one lens's derived L1 observations and L2 facets (for a
 // `lens backfill --fresh`: re-mine a lens from scratch after its prompt changed). Raw L0
 // is the durable record and is NOT touched. facet_versions cascade via the ON DELETE
-// CASCADE foreign key. Runs in one transaction so a rebuild never leaves half a lens's
-// derived data behind. Returns (observations, facets) removed.
+// CASCADE foreign key. Runs in one transaction so a `--fresh` drop never leaves half a
+// lens's derived data behind. Returns (observations, facets) removed.
 //
 // NOTE: "re-mine from scratch" fully restores only MINED observations (source='mined'),
 // which the worker re-extracts from the untouched L0. In-session ACTIVE observations

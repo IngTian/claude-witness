@@ -66,24 +66,36 @@ func seedDefaultLensOnOpen(st *store.Store) {
 		_ = st.SetMetaString(defaultMigratedKey, "opted-out")
 		return
 	}
+	// Complete an INCOMPLETE PRIOR SEED first. A partial seed (RegisterLens succeeded but
+	// EnableLens failed, leaving the marker unset for retry) shows up as: marker unset AND
+	// default already registered. Because ANY command Opens the store and this hook stamps
+	// the marker on its first decision, a user cannot deregister/disable default before the
+	// marker is set — so "unset marker + registered default" is unambiguously an unfinished
+	// seed, never a user's choice. Finish it (idempotently ensure registered+enabled) and
+	// only then stamp the marker. Doing this BEFORE the wantSeed gate matters: once default
+	// is registered, `IsEmptyArchive() && 0-registered` is false, so a fresh archive's
+	// partial seed would otherwise fall into the !wantSeed "n/a" branch and be left
+	// registered-but-DISABLED with the one-shot burned.
+	if slices.Contains(st.RegisteredLenses(), store.LensDefault) {
+		if err := seedDefaultLens(st); err != nil {
+			slog.Warn("could not finish seeding the built-in default lens; will retry on the next start (or run `witness lens load-default`)",
+				"err", err)
+			return // leave the flag UNSET → retry next Open
+		}
+		_ = st.SetMetaString(defaultMigratedKey, "done")
+		return
+	}
 	// Decide whether this archive should get default:
 	//   - PRE-1a archive (a 'default' progress row) → migrate, so an existing install
 	//     keeps working exactly as before; OR
 	//   - BRAND-NEW archive (no raw, no watermarks) with an EMPTY registry → a fresh
 	//     personal install auto-seeds the starter lens.
 	// A library archive that already ingested records + ran its own domain lens is
-	// neither (not empty, no legacy default), and an archive that already has other
-	// lenses registered is left alone — neither gets default forced onto it.
+	// neither (not empty, no legacy default), so it does not get default forced onto it.
 	wantSeed := st.HasLegacyDefaultData() ||
 		(st.IsEmptyArchive() && len(st.RegisteredLenses()) == 0)
 	if !wantSeed {
 		_ = st.SetMetaString(defaultMigratedKey, "n/a") // decided: don't seed; don't re-check
-		return
-	}
-	// Already registered (e.g. a prior partial run seeded it before the flag was set) →
-	// just record the one-shot as done; do not re-register/clobber a user's edits.
-	if slices.Contains(st.RegisteredLenses(), store.LensDefault) {
-		_ = st.SetMetaString(defaultMigratedKey, "done")
 		return
 	}
 	if err := seedDefaultLens(st); err != nil {
