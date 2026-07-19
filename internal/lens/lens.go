@@ -215,8 +215,9 @@ func LoadRegistered(name, lensesDir string) (*Lens, error) {
 // work-in-progress lens missing a lens.json name still previews. It does NOT apply the
 // reserved-name gate (see LoadFromDir for the strict variant) — a preview never writes
 // to the archive, so an impersonating name can't collide with anything. It still
-// requires a non-empty extract.md (that is the prompt being previewed). Default is
-// forced false — a candidate is never the always-on built-in.
+// requires a non-empty extract.md (that is the prompt being previewed). BuiltIn is
+// forced false — a candidate previewed from an arbitrary dir is never treated as the
+// seeded lens.
 func LoadFromDirUnchecked(dir string) (*Lens, error) {
 	base := strings.TrimSpace(filepath.Base(strings.TrimRight(dir, string(filepath.Separator))))
 	l, err := loadDir(dir, base)

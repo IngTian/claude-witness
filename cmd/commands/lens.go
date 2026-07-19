@@ -176,10 +176,11 @@ func cmdLens(args []string) error {
 // cleared, the drain mines just this lens on already-distilled sessions — default
 // and every other lens keep their watermarks and are never re-mined.
 //
-// It requires the lens to be ACTIVE (default, or registered+enabled): the drain's
-// pending query cross-joins the active-lens set, so a reset watermark for an
-// inactive lens would be invisible and nothing would happen. We fail fast with a
-// clear message rather than silently no-op.
+// It requires the lens to be registered AND enabled (since #44 slice 1a default has no
+// exemption — it's an ordinary lens): the drain's pending query cross-joins the
+// active-lens set, so a reset watermark for an inactive lens would be invisible and
+// nothing would happen — and for `rebuild` the pre-drop of obs+facets would then be
+// irrecoverable. We fail fast with a clear message rather than silently no-op / lose data.
 func lensBackfill(st *store.Store, name string, rebuild bool) error {
 	// Resolve the CLI arg to the name the WORKER actually keys data under. A
 	// registered lens's mined observations/facets/progress are tagged with the lens's
@@ -187,20 +188,23 @@ func lensBackfill(st *store.Store, name string, rebuild bool) error {
 	// from the registry/CLI name the user typed. Operating on the CLI name would make
 	// DeleteLensData/ResetLensWatermark match ZERO rows and silently "succeed" while
 	// the real data persists. So load the lens and use its resolved .Name.
-	minedName := name
-	if name != store.LensDefault {
-		if !slices.Contains(st.RegisteredLenses(), name) {
-			return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
-		}
-		if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
-			return fmt.Errorf("lens %q is registered but not enabled; enable it first (witness lens enable %s), or it won't be mined", name, name)
-		}
-		l, err := lens.LoadRegistered(name, st.LensesDir())
-		if err != nil {
-			return fmt.Errorf("load lens %q: %w", name, err)
-		}
-		minedName = l.Name // the name the worker tags observations/facets/progress with
+	// Since #44 slice 1a "default" has NO privileged always-active status — it is an
+	// ordinary registered lens. So it is subject to the SAME registered+enabled
+	// precondition as every other lens: without it, `lens rebuild default` on a disabled/
+	// deregistered default would DeleteLensData (drop obs+facets) and then no-op the
+	// re-mine (the drain excludes inactive lenses), destroying data irrecoverably. The
+	// guard below fails fast in exactly that case, for default like any lens.
+	if !slices.Contains(st.RegisteredLenses(), name) {
+		return fmt.Errorf("lens %q is not registered (see `witness lens list`)", name)
 	}
+	if !slices.Contains(st.LoadConfig().EnabledLenses, name) {
+		return fmt.Errorf("lens %q is registered but not enabled; enable it first (witness lens enable %s), or it won't be mined", name, name)
+	}
+	l, err := lens.LoadRegistered(name, st.LensesDir())
+	if err != nil {
+		return fmt.Errorf("load lens %q: %w", name, err)
+	}
+	minedName := l.Name // the name the worker tags observations/facets/progress with
 	if rebuild {
 		obs, facets, err := st.DeleteLensData(minedName)
 		if err != nil {

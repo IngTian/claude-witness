@@ -45,6 +45,22 @@ func (p *profileFS) WriteProfile(lens, markdown string) error {
 	return os.WriteFile(filepath.Join(p.ProfileDir(), name), []byte(markdown), 0o600)
 }
 
+// DeleteProfile removes a lens's summary file so ReadProfile reports exists=false
+// again (the readers then show the friendly "not generated yet" message rather than a
+// blank/empty portrait). Used when a profile stops being applicable — e.g. the unified
+// portrait once <2 lenses remain (#44 slice 1a). A missing file is not an error
+// (idempotent). Same path-safety as the other methods (rejects an escaping name).
+func (p *profileFS) DeleteProfile(lens string) error {
+	name, err := profileFileName(lens)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(p.ProfileDir(), name)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // ReadProfile returns a lens's narrative summary and whether it exists yet (a
 // missing summary is exists=false, not an error, so callers can show a friendly
 // "not generated yet" message).

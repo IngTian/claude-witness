@@ -106,10 +106,10 @@ func TestLoadRegisteredRejectsLegacyLensMD(t *testing.T) {
 }
 
 // The reserved-name guard's ultimate backstop: a lens registered under an innocent
-// directory name whose lens.json `name` resolves to a reserved identity ("default" or
-// "unified") must be REJECTED at load — else it would impersonate the always-on built-in
-// / the unified summary and collide on the shared lens key. RegisterLens/EnableLens guard
-// the registry NAME, but only the resolved json name is known here, so this is where the
+// directory name whose lens.json `name` resolves to the reserved "unified" identity must
+// be REJECTED at load — else it would clobber the cross-lens unified portrait file.
+// (Since #44 slice 1a "default" is NOT reserved and loads fine.) RegisterLens/EnableLens
+// guard the registry NAME, but only the resolved json name is known here, so this is where the
 // impersonation is caught. Case variants too (the reserved-name check folds case).
 func TestLoadRegisteredRejectsReservedJSONName(t *testing.T) {
 	// Only "unified" is reserved since #44 slice 1a; "default" is an ordinary lens.

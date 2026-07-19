@@ -10,14 +10,15 @@ import (
 )
 
 // ReservedLensName reports whether a lens name is reserved and may not be taken by
-// a registered lens. Two names are reserved (both defined in types.go, the single
-// source of truth):
-//   - LensDefault ("default") — the always-on built-in lens's identity. A second
-//     lens under this name would share the built-in's (session,'default') watermark
-//     and observation key, corrupting the backbone lens's data (two prompts writing
-//     Lens='default', one progress row, cross-contaminated dedup).
+// a registered lens. Since #44 slice 1a exactly ONE name is reserved:
 //   - ProfileUnified ("unified") — the cross-lens profile summary's filename stem; a
-//     per-lens summary under this name would clobber the unified portrait.
+//     per-lens summary under this name would clobber the unified portrait (profile/
+//     unified.md). It is NOT a lens (nothing mines it), so reserving its name can't
+//     deny a user any real lens.
+//
+// "default" is NO LONGER reserved: it is an ordinary registered lens (the person-growth
+// scaffold witness seeds). A user may re-register "default" with their own prompts —
+// that intentionally redefines their own lens; it doesn't collide with anyone else's.
 //
 // Since #44 slice 1a "default" is NO LONGER reserved: it is now an ordinary
 // registered lens (the personal-growth scaffold witness ships and seeds on a fresh
@@ -94,7 +95,7 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 	}
 	defer unlock()
 	if ReservedLensName(name) {
-		return fmt.Errorf("lens name %q is reserved (the always-on built-in lens or the cross-lens summary); choose another name", name)
+		return fmt.Errorf("lens name %q is reserved (the cross-lens 'unified' summary); choose another name", name)
 	}
 	// Reject a name that isn't already a slug. The registry dir is sanitize(name)
 	// (non-[A-Za-z0-9_-] → '_'), but every CLI gate (set/enable/backfill/show) and
@@ -104,6 +105,20 @@ func (r *lensReg) RegisterLens(name, srcDir string) error {
 	// handle, closing that gap at the single source instead of sanitizing at every gate.
 	if sanitize(name) != name {
 		return fmt.Errorf("lens name %q must be a slug — letters, digits, '-', '_' only (no spaces or special characters)", name)
+	}
+	// Reject a name that case-insensitively collides with an ALREADY-registered lens
+	// under a different casing. The registry dir is sanitize(name) with case PRESERVED,
+	// but witness's primary filesystems (macOS APFS, Windows NTFS) are case-insensitive,
+	// so `register Default` would reuse `lenses/default`'s dir and clobber it. Pre-1a the
+	// reserved-name gate blocked "Default" (case-folded); now that "default" is an
+	// ordinary registerable lens that gate is gone, so guard the collision generally
+	// (this protects ANY lens, not just default) — an exact-case re-register (name ==
+	// existing) is still allowed (that's an intentional overwrite/update).
+	lname := strings.ToLower(name)
+	for _, existing := range r.RegisteredLenses() {
+		if existing != name && strings.ToLower(existing) == lname {
+			return fmt.Errorf("lens name %q collides with the already-registered %q on a case-insensitive filesystem; pick a distinct name or re-register %q exactly", name, existing, existing)
+		}
 	}
 	info, err := os.Stat(srcDir)
 	if err != nil {

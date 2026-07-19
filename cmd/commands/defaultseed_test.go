@@ -3,6 +3,7 @@ package commands
 import (
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/IngTian/witness/internal/store"
@@ -32,14 +33,19 @@ func TestDefaultSeedMigratesPre1aArchive(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "witness")
 	s := openSeedTestStore(t, home)
 
-	// Simulate a pre-1a archive: real L0 + a distillation watermark under "default",
-	// which is exactly what HasLegacyDefaultData keys on. (A fresh Open already ran the
-	// hook once and found no legacy data — this seeds the legacy signal for the re-open.)
+	// Simulate a genuine PRE-1a archive: real L0 + a distillation watermark under
+	// "default" (what HasLegacyDefaultData keys on), and NO migration flag — the flag
+	// didn't exist before this feature. The first openSeedTestStore already ran the hook
+	// on the then-empty archive and stamped the flag "n/a"; clear it so the re-open sees
+	// the true pre-1a state (legacy data present, never migrated).
 	if err := s.AppendRaw(store.RawRecord{Session: "s", Seq: 0, Role: "user", Text: "hi"}); err != nil {
 		t.Fatalf("AppendRaw: %v", err)
 	}
 	if err := s.MarkDistilled("s", store.LensDefault, 1); err != nil {
 		t.Fatalf("MarkDistilled: %v", err)
+	}
+	if err := s.SetMetaString(defaultMigratedKey, ""); err != nil {
+		t.Fatalf("clear migration flag: %v", err)
 	}
 	if slices.Contains(s.RegisteredLenses(), store.LensDefault) {
 		t.Fatal("precondition: default should NOT be registered before migration")
@@ -79,6 +85,100 @@ func TestDefaultSeedMigratesPre1aArchive(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("default must be registered exactly once after re-open; got %d", count)
+	}
+}
+
+// TestDeregisteredDefaultStaysGone is the regression guard for the adversarial
+// finding that the migration RESURRECTED a deregistered default forever (the two gates
+// disagreed: trigger keyed on ever-present progress rows, idempotency on registry
+// presence). The one-shot meta flag now makes the migration truly one-shot: after it
+// runs once, deregistering + disabling default must STICK across re-opens — the "run
+// any set of lenses, including none" promise. The legacy default-progress rows persist
+// (deregister doesn't clear them), so this specifically proves the gate is the FLAG,
+// not those rows.
+func TestDeregisteredDefaultStaysGone(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "witness")
+	// Migrate a pre-1a archive (as above): legacy data + cleared flag → Open seeds default.
+	s := openSeedTestStore(t, home)
+	if err := s.AppendRaw(store.RawRecord{Session: "s", Seq: 0, Role: "user", Text: "hi"}); err != nil {
+		t.Fatalf("AppendRaw: %v", err)
+	}
+	if err := s.MarkDistilled("s", store.LensDefault, 1); err != nil {
+		t.Fatalf("MarkDistilled: %v", err)
+	}
+	if err := s.SetMetaString(defaultMigratedKey, ""); err != nil {
+		t.Fatalf("clear flag: %v", err)
+	}
+	_ = s.Close()
+	s2 := openSeedTestStore(t, home) // migrates → default registered+enabled
+	if !slices.Contains(s2.RegisteredLenses(), store.LensDefault) {
+		t.Fatal("precondition: migration should have seeded default")
+	}
+
+	// The user removes default entirely — the exact "I don't want this lens" action.
+	if err := s2.DisableLens(store.LensDefault); err != nil {
+		t.Fatalf("DisableLens: %v", err)
+	}
+	if err := s2.DeregisterLens(store.LensDefault); err != nil {
+		t.Fatalf("DeregisterLens: %v", err)
+	}
+	// The legacy signal that used to (wrongly) trigger re-seeding still exists...
+	if !s2.HasLegacyDefaultData() {
+		t.Fatal("precondition: legacy default progress rows should persist (deregister doesn't clear them)")
+	}
+	_ = s2.Close()
+
+	// ...but across TWO more Opens, default must STAY gone (flag gates the one-shot).
+	s3 := openSeedTestStore(t, home)
+	if slices.Contains(s3.RegisteredLenses(), store.LensDefault) {
+		t.Fatal("BUG: deregistered default was resurrected in the registry on re-open")
+	}
+	if slices.Contains(s3.LoadConfig().EnabledLenses, store.LensDefault) {
+		t.Fatal("BUG: deregistered default was re-enabled on re-open")
+	}
+	_ = s3.Close()
+	s4 := openSeedTestStore(t, home)
+	if slices.Contains(s4.RegisteredLenses(), store.LensDefault) {
+		t.Fatal("BUG: deregistered default resurrected on the second re-open")
+	}
+}
+
+// TestRebuildDisabledDefaultFailsFast is the regression guard for the adversarial
+// data-loss finding: `lens rebuild default` on a DISABLED default used to bypass the
+// registered+enabled precondition (an `if name != LensDefault` special-case), so it
+// DeleteLensData'd default's observations+facets and then no-op'd the re-mine (the drain
+// excludes inactive lenses) — irreversible loss. The special-case is gone; default is now
+// subject to the same guard as any lens, so rebuild fails fast BEFORE dropping anything.
+func TestRebuildDisabledDefaultFailsFast(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "witness")
+	s := openSeedTestStore(t, home)
+	// Register+enable default, then seed L1/L2 + a watermark under it.
+	if err := seedDefaultLens(s); err != nil {
+		t.Fatalf("seedDefaultLens: %v", err)
+	}
+	if err := s.AppendObservations([]store.Observation{{ID: "o1", Lens: store.LensDefault, Observation: "x", Poignancy: 3}}); err != nil {
+		t.Fatalf("AppendObservations: %v", err)
+	}
+	if err := s.MarkDistilled("s", store.LensDefault, 1); err != nil {
+		t.Fatalf("MarkDistilled: %v", err)
+	}
+	// Disable default → it's registered but NOT enabled.
+	if err := s.DisableLens(store.LensDefault); err != nil {
+		t.Fatalf("DisableLens: %v", err)
+	}
+	obsBefore, _ := s.ReadObservations("")
+
+	// rebuild must FAIL FAST (not enabled) and drop NOTHING.
+	err := lensBackfill(s, store.LensDefault, true)
+	if err == nil {
+		t.Fatal("rebuild of a DISABLED default must fail fast, not proceed to delete data")
+	}
+	if !strings.Contains(err.Error(), "not enabled") {
+		t.Fatalf("expected an 'enable it first' error, got: %v", err)
+	}
+	obsAfter, _ := s.ReadObservations("")
+	if len(obsAfter) != len(obsBefore) || len(obsAfter) == 0 {
+		t.Fatalf("rebuild must NOT have dropped observations: before=%d after=%d", len(obsBefore), len(obsAfter))
 	}
 }
 

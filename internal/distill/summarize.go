@@ -154,8 +154,11 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 	// <2 lenses have facets, and clear any stale unified profile left from when there were
 	// more (so a lens removal doesn't strand a portrait describing lenses that are gone).
 	if len(lenses) < 2 {
+		// DELETE (not blank-write) any stale portrait so readers (get_profile /
+		// `witness profile`) show the clean "not generated yet" message rather than an
+		// empty document. Clear its signature too so a later return to ≥2 lenses rebuilds.
 		if _, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok {
-			_ = sm.Store.WriteProfile(store.ProfileUnified, "")
+			_ = sm.Store.DeleteProfile(store.ProfileUnified)
 			_ = sm.Store.SetMetaString(profileSigKey(store.ProfileUnified), "")
 		}
 		return nil
