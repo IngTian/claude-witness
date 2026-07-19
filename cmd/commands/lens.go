@@ -15,7 +15,7 @@ func newLensCmd() *cobra.Command {
 	lensCmd := &cobra.Command{
 		Use:   "lens",
 		Short: "Manage global observation lenses.",
-		Long:  "Manage the central lens registry. Registered and enabled lenses run globally across every session alongside the always-on default lens.",
+		Long:  "Manage the central lens registry. Every enabled, registered lens runs globally across every session. The built-in \"default\" person-growth lens is an ordinary registered lens (seeded on install) — enable/disable/edit/re-register it like any other; an archive may run any set of lenses, including none.",
 	}
 	lensCmd.AddCommand(
 		&cobra.Command{
@@ -60,7 +60,7 @@ func newLensCmd() *cobra.Command {
 		&cobra.Command{
 			Use:   "backfill <name>",
 			Short: "Mine one lens over the whole history (catch up a newly-enabled lens).",
-			Long:  "Reset just this lens's distillation watermark so every past session is re-offered FOR THIS LENS, then drain the backlog in the foreground. Only the named lens is mined — the always-on default lens and every other lens keep their watermarks and are never re-mined. This is the enable-a-new-lens path: cost scales with one lens × history, not all lenses × history.",
+			Long:  "Reset just this lens's distillation watermark so every past session is re-offered FOR THIS LENS, then drain the backlog in the foreground. Only the named lens is mined — every other lens (default included) keeps its watermark and is never re-mined. This is the enable-a-new-lens path: cost scales with one lens × history, not all lenses × history.",
 			Args:  cobra.ExactArgs(1),
 			RunE:  func(_ *cobra.Command, args []string) error { return cmdLens(append([]string{"backfill"}, args...)) },
 		},
@@ -77,7 +77,8 @@ func newLensCmd() *cobra.Command {
 }
 
 // cmdLens manages the central, global lens registry. Lenses are defined once and
-// shared across every session (alongside the always-on "default" lens):
+// shared across every session. Since #44 slice 1a "default" is an ordinary registered
+// lens (no always-on status), so it is managed through these same commands:
 //
 //	witness lens register <name> <dir>    add/replace a lens definition
 //	witness lens deregister <name>        remove a lens definition
@@ -132,11 +133,12 @@ func cmdLens(args []string) error {
 	case "list":
 		enabled := st.LoadConfig().EnabledLenses
 		reg := st.RegisteredLenses()
-		// The default lens always runs and isn't in the registry; show it first so
-		// `lens list` reflects what actually runs, not just the registered extras.
-		fmt.Printf("  %s %s  %s\n", green("✓"), store.LensDefault, dim("(built-in, always on)"))
+		// Since #44 slice 1a "default" has no special status — it is a registered lens
+		// like any other (seeded on install, or migrated in), so it appears in this loop
+		// naturally. An archive may have ZERO lenses (all disabled / none seeded), a legal
+		// "nothing to distill" state.
 		if len(reg) == 0 {
-			fmt.Println(dim("  no additional lenses registered"))
+			fmt.Println(dim("  no lenses registered — nothing is distilled (register one with `witness lens register <name> <dir>`)"))
 			return nil
 		}
 		for _, name := range reg {
@@ -417,16 +419,23 @@ func activeLenses(st *store.Store) ([]*lens.Lens, error) {
 }
 
 // activeLensNames is the per-lens-watermark (#55) view of the active lens set: the
-// NAMES the pending/stats queries cross-join sessions against. It returns only
-// lenses that actually LOAD (default + enabled-and-loadable), matching activeLenses,
-// so the queue never offers a (session,lens) pair the worker can't mine — which
-// would otherwise be a no-progress cycle (config says active, mining always skips).
-// On a total default-load failure it falls back to ["default"] so the always-on
-// lens is never dropped from the watermark accounting.
+// NAMES the pending/stats queries cross-join sessions against. It returns only the
+// lenses that actually LOAD (enabled-and-loadable), matching activeLenses, so the queue
+// never offers a (session,lens) pair the worker can't mine — which would otherwise be a
+// no-progress cycle (config says active, mining always skips).
+//
+// Since #44 slice 1a an EMPTY result is legal and correct — an install with no enabled
+// lenses distills nothing, and the queue short-circuits cleanly on an empty set (see
+// store.emptyLensSet). We must NOT force ["default"] here: default has no always-on
+// status, so injecting it when it isn't enabled would offer sessions for a lens that
+// never runs (the very no-progress cycle above) and resurrect a lens the user disabled.
+// Only a hard error loading the config is unexpected — return empty there too and let
+// the drain no-op rather than fabricate a lens set.
 func activeLensNames(st *store.Store) []string {
 	lenses, err := activeLenses(st)
-	if err != nil || len(lenses) == 0 {
-		return []string{store.LensDefault}
+	if err != nil {
+		slog.Warn("could not load active lenses; treating as none this pass", "err", err)
+		return nil
 	}
 	names := make([]string, 0, len(lenses))
 	for _, l := range lenses {

@@ -82,6 +82,35 @@ func TestDefaultSeedMigratesPre1aArchive(t *testing.T) {
 	}
 }
 
+// TestSeedDefaultLensScaffoldsFreshArchive covers the tool-install scaffold path
+// (slice-1a step 6): `witness install` calls seedDefaultLens on a fresh archive so a
+// new personal user starts with the default lens registered + enabled (default no
+// longer being always-on). Direct call — full cmdInstall needs the claude/opencode
+// binaries, but this is the exact seeding step it performs.
+func TestSeedDefaultLensScaffoldsFreshArchive(t *testing.T) {
+	s := openSeedTestStore(t, filepath.Join(t.TempDir(), "fresh"))
+	if slices.Contains(s.RegisteredLenses(), store.LensDefault) {
+		t.Fatal("precondition: fresh archive has no default lens until scaffolded")
+	}
+	if err := seedDefaultLens(s); err != nil {
+		t.Fatalf("seedDefaultLens: %v", err)
+	}
+	if !slices.Contains(s.RegisteredLenses(), store.LensDefault) {
+		t.Fatal("scaffold must register the default lens")
+	}
+	if !slices.Contains(s.LoadConfig().EnabledLenses, store.LensDefault) {
+		t.Fatal("scaffold must enable the default lens")
+	}
+	// The seeded lens carries the person dimensions from the bundled prompts/default/lens.json.
+	act, err := activeLenses(s)
+	if err != nil || len(act) != 1 || act[0].Name != store.LensDefault {
+		t.Fatalf("activeLenses after scaffold = %v (err %v), want just default", act, err)
+	}
+	if len(act[0].Dimensions) == 0 {
+		t.Fatal("scaffolded default must carry its dimensions from the seeded lens.json")
+	}
+}
+
 // TestDefaultSeedSkipsFreshAndLibraryArchive proves the migration does NOT force
 // default onto (a) a fresh archive with no distillation history, nor (b) a library-mode
 // archive that only ever ran its own domain lens — both have no "default" progress row,

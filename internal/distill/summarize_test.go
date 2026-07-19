@@ -173,9 +173,14 @@ func TestSummarizerRegeneratesWhenUnifiedPromptChanges(t *testing.T) {
 // unified portrait WITHOUT it — even when no surviving lens changed. The old
 // !anyChanged heuristic skipped the unified here, leaving it describing a lens that no
 // longer exists (an audit-found regression vs. always-rebuild). #73-S5.
-func TestSummarizerRebuildsUnifiedWhenLensRemoved(t *testing.T) {
+// TestSummarizerClearsUnifiedWhenDroppingToOneLens: the unified portrait is a CROSS-lens
+// synthesis (#44 slice 1a), so once only ONE lens has facets it is degenerate — the
+// summarizer must NOT regenerate it (no wasted LLM call restating the lone lens) and must
+// CLEAR any stale portrait left from when there were more (so it can't keep describing a
+// lens that's gone).
+func TestSummarizerClearsUnifiedWhenDroppingToOneLens(t *testing.T) {
 	s := newStore(t)
-	seedFacets(t, s) // default + math
+	seedFacets(t, s) // default + math (2 lenses → a real unified portrait)
 	var unifiedInputs []string
 	fake := func(_ context.Context, _, prompt, input string) (string, error) {
 		if prompt == "UNIFIED" {
@@ -188,9 +193,12 @@ func TestSummarizerRebuildsUnifiedWhenLensRemoved(t *testing.T) {
 	if err := sm.Summarize(context.Background()); err != nil {
 		t.Fatalf("first Summarize: %v", err)
 	}
+	if md, ok, _ := s.ReadProfile("unified"); !ok || md == "" {
+		t.Fatalf("precondition: 2 lenses should produce a unified portrait, got ok=%v md=%q", ok, md)
+	}
 	unifiedInputs = nil
 
-	// Drop the math lens entirely (default's facets unchanged → default is skipped).
+	// Drop the math lens entirely → only "default" has facets now.
 	if err := s.WriteFacets([]store.Facet{
 		{Lens: "default", Dimension: "traits", Key: "satisfices",
 			Versions: []store.FacetVersion{{Value: "stops at good enough", Confidence: 0.9}}},
@@ -200,12 +208,12 @@ func TestSummarizerRebuildsUnifiedWhenLensRemoved(t *testing.T) {
 	if err := sm.Summarize(context.Background()); err != nil {
 		t.Fatalf("second Summarize: %v", err)
 	}
-	// The unified MUST have rebuilt (its portrait no longer contains math).
-	if len(unifiedInputs) != 1 {
-		t.Fatalf("removing a lens must rebuild the unified once, got %d", len(unifiedInputs))
+	// No unified LLM call at 1 lens, and the stale portrait is cleared.
+	if len(unifiedInputs) != 0 {
+		t.Fatalf("dropping to one lens must NOT regenerate the unified, got %d call(s)", len(unifiedInputs))
 	}
-	if strings.Contains(unifiedInputs[0], "math") || strings.Contains(unifiedInputs[0], "arithmetic") {
-		t.Fatalf("rebuilt portrait must not mention the removed math lens, got: %q", unifiedInputs[0])
+	if md, _, _ := s.ReadProfile("unified"); strings.TrimSpace(md) != "" {
+		t.Fatalf("stale unified portrait must be cleared at one lens, got: %q", md)
 	}
 }
 

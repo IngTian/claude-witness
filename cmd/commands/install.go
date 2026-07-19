@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/IngTian/witness/internal/platform"
@@ -15,16 +16,19 @@ import (
 )
 
 func newInstallCmd() *cobra.Command {
-	return &cobra.Command{
+	var noDefault bool
+	c := &cobra.Command{
 		Use:    "install <claude|opencode>",
 		Short:  "Install witness integrations.",
-		Long:   "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.",
+		Long:   "Install the Claude Code integration (hooks + MCP) or the OpenCode integration (plugin + MCP). The target is required so install always binds the matching distillation runtime.\n\nInstall also SCAFFOLDS the built-in \"default\" person-growth lens into your archive (unless --no-default), since #44 slice 1a made default an ordinary registered lens rather than an always-on built-in. Pass --no-default to start with no lenses and register your own.",
 		Hidden: os.Getenv("WITNESS_NPM_PACKAGE") == "1",
 		Args:   cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			return cmdInstall(args)
+			return cmdInstall(args, !noDefault)
 		},
 	}
+	c.Flags().BoolVar(&noDefault, "no-default", false, "do not scaffold the built-in default person-growth lens (start with no lenses)")
+	return c
 }
 
 func newUninstallCmd() *cobra.Command {
@@ -353,7 +357,7 @@ func repoShim() (string, error) {
 // cmdInstall wires witness into Claude Code or OpenCode. The target is required
 // (enforced by cobra ExactArgs) so install always binds the matching distillation
 // runtime into config.toml.
-func cmdInstall(args []string) error {
+func cmdInstall(args []string, scaffoldDefault bool) error {
 	target := installTarget(args)
 	in, ok := platform.InstallerFor(target)
 	if !ok {
@@ -362,7 +366,32 @@ func cmdInstall(args []string) error {
 	if err := in.Install(); err != nil {
 		return err
 	}
-	return bindRunner(target)
+	if err := bindRunner(target); err != nil {
+		return err
+	}
+	// Scaffold the built-in default person-growth lens (the tool preset), unless the
+	// user opted out. Since #44 slice 1a default is an ordinary registered lens with no
+	// always-on status, so a fresh install must seed+enable it explicitly or the archive
+	// starts with zero lenses. Best-effort: seeding failure shouldn't fail the whole
+	// install (the integration is already wired); the user can `witness lens register
+	// default` later. The pre-1a migration hook handles EXISTING archives separately.
+	if scaffoldDefault {
+		st, err := store.Open()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "witness: installed, but could not open the archive to scaffold the default lens: %v\n", err)
+			return nil
+		}
+		defer st.Close()
+		if slices.Contains(st.RegisteredLenses(), store.LensDefault) {
+			return nil // already present (an existing archive) — nothing to scaffold
+		}
+		if err := seedDefaultLens(st); err != nil {
+			fmt.Fprintf(os.Stderr, "witness: installed, but could not scaffold the default lens (register it later with `witness lens register default`): %v\n", err)
+			return nil
+		}
+		fmt.Println("scaffolded the built-in 'default' person-growth lens (disable with `witness lens disable default`, or re-run install with --no-default).")
+	}
+	return nil
 }
 
 // bindRunner pins config.toml's runner field to the integration that was just

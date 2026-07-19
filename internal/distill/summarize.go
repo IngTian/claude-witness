@@ -147,6 +147,19 @@ func (sm *Summarizer) Summarize(ctx context.Context) error {
 		fmt.Fprintf(&portrait, "## %s\n\n%s\n\n", l, md)
 	}
 
+	// The unified portrait is a CROSS-lens synthesis — it only means something with ≥2
+	// lenses. With a single lens (common since #44 slice 1a: an install may run just one
+	// domain lens, e.g. a market-news archive) the "unified" portrait would merely restate
+	// that lone lens's summary, burning an extra LLM call for a duplicate. So skip it when
+	// <2 lenses have facets, and clear any stale unified profile left from when there were
+	// more (so a lens removal doesn't strand a portrait describing lenses that are gone).
+	if len(lenses) < 2 {
+		if _, ok, _ := sm.Store.ReadProfile(store.ProfileUnified); ok {
+			_ = sm.Store.WriteProfile(store.ProfileUnified, "")
+			_ = sm.Store.SetMetaString(profileSigKey(store.ProfileUnified), "")
+		}
+		return nil
+	}
 	// The unified portrait spans all lenses → no single lens → the default DistillModel
 	// (ModelFor with a nil lens).
 	unifiedModel := ModelFor(sm.Config, nil, PhaseReview)
